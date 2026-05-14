@@ -1,43 +1,3 @@
-// main.cpp
-//
-// Simple MP3 Player
-// Uses:
-//   - minimp3
-//   - SDL2
-//   - Dear ImGui
-//
-// Features:
-//   - Open MP3 file
-//   - Play / Pause
-//   - Stop
-//   - Seek bar
-//   - Progress display
-//
-// ------------------------------------------------------------
-// BUILD NOTES
-// ------------------------------------------------------------
-//
-// Required libraries:
-//
-// SDL2:
-//   https://www.libsdl.org
-//
-// Dear ImGui:
-//   https://github.com/ocornut/imgui
-//
-// minimp3:
-//   https://github.com/lieff/minimp3
-//
-// You need these ImGui files:
-//
-//   imgui.cpp
-//   imgui_draw.cpp
-//   imgui_widgets.cpp
-//   imgui_tables.cpp
-//   imgui_impl_sdl2.cpp
-//   imgui_impl_sdlrenderer2.cpp
-//
-
 #include <SDL.h>
 #include <iostream>
 #include <vector>
@@ -193,12 +153,13 @@ int main(int argc, char** argv)
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "MP3 Player",
+        "zapp",
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         800,
         300,
-        SDL_WINDOW_SHOWN);
+        SDL_WINDOW_SHOWN
+    );
 
     SDL_Renderer* renderer =
         SDL_CreateRenderer(
@@ -279,16 +240,9 @@ int main(int argc, char** argv)
         // Playback Controls
         // ----------------------------------------------------
 
-        if (ImGui::Button("Play"))
+        if (ImGui::Button("Play/Pause"))
         {
-            gAudio.playing = true;
-        }
-
-        ImGui::SameLine();
-
-        if (ImGui::Button("Pause"))
-        {
-            gAudio.playing = false;
+            gAudio.playing = !gAudio.playing;
         }
 
         ImGui::SameLine();
@@ -358,7 +312,7 @@ int main(int argc, char** argv)
         SDL_RenderClear(renderer);
 
         ImGui_ImplSDLRenderer2_RenderDrawData(
-            ImGui::GetDrawData());
+            ImGui::GetDrawData(), renderer);
 
         SDL_RenderPresent(renderer);
     }

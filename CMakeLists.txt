@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 
 find_package(SDL2 REQUIRED)
 
-add_executable(mp3_player
+add_executable(zapp
      main.cpp
 
      imgui/imgui.cpp
@@ -17,11 +17,11 @@ add_executable(mp3_player
      imgui/backends/imgui_impl_sdlrenderer2.cpp
  )
 
-target_include_directories(mp3_player PRIVATE
+target_include_directories(zapp PRIVATE
      imgui
      imgui/backends
      SDL2_INCLUDE_DIRS
      minimp3
  )
 
-target_link_libraries(mp3_player PRIVATE SDL2::SDL2)
+target_link_libraries(zapp PRIVATE SDL2::SDL2)
