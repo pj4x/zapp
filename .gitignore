@@ -1,0 +1,62 @@
+# Build directories
+build/
+Build/
+cmake-build-*/
+out/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+cmake_uninstall.cmake
+
+# Generated build systems
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Autotools / libtool leftovers
+aclocal.m4
+autom4te.cache/
+libtool
+m4/
+
+# Visual Studio / MSVC
+*.vcxproj*
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sdf
+*.opensdf
+*.VC.db
+
+# CLion / JetBrains
+.idea/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+
+# Windows
+Thumbs.db
+
+# Binary outputs
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+*.exe
+*.out
