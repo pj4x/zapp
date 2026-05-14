@@ -60,3 +60,5 @@ Thumbs.db
 *.lib
 *.exe
 *.out
+
+.DS_Store
