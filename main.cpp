@@ -805,7 +805,7 @@ int main(int argc, char** argv)
                 ImGui::Text("about");
                 ImGui::Indent();
                 ImGui::Text("zapp music player");
-                ImGui::Text("ver 0.1");
+                ImGui::Text("ver idfk");
                 ImGui::Unindent();
 
                 ImGui::Spacing();
