@@ -18,14 +18,11 @@
 #include "includes/zapp/globals.h"
 #include "includes/zapp/helperImgui.h"
 
-// JSON library (single header - https://github.com/nlohmann/json)
 #include <nlohmann/json.hpp>
 
-// Tiny file dialogs for folder selection
 #define TINYFILEDIALOGS_IMPLEMENTATION
 #include "tinyfiledialogs.h"
 
-// minimp3
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_FLOAT_OUTPUT
 #include "minimp3_ex.h"
