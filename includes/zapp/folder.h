@@ -20,7 +20,7 @@
 // Folder Scanning (Worker Thread)
 // ------------------------------------------------------------
 
-inline void scan_folder_worker(const std::string& folderPath)
+inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist, std::string& playlistName)
 {
     g_scanStatus = "Scanning folder: " + folderPath;
 
@@ -74,6 +74,9 @@ inline void scan_folder_worker(const std::string& folderPath)
             {
                 song.id = ++maxId;
                 g_allSongs.push_back(song);
+                if(addToPlaylist){
+                    add_song_to_playlist(playlistName, song.id);
+                }
             }
         }
 
@@ -93,12 +96,12 @@ inline void scan_folder_worker(const std::string& folderPath)
     g_scanning = false;
 }
 
-inline void start_folder_scan(const std::string& folderPath)
+inline void start_folder_scan(const std::string& folderPath, bool addToPlaylist, std::string& playlistName)
 {
     if (g_scanning) return;
 
     g_scanning = true;
-    std::thread scanThread(scan_folder_worker, folderPath);
+    std::thread scanThread(scan_folder_worker, folderPath, addToPlaylist, std::ref(playlistName));
     scanThread.detach();
 }
 

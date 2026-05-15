@@ -15,6 +15,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
+#include "includes/zapp/database.h"
 #include "includes/zapp/globals.h"
 #include "includes/zapp/helperImgui.h"
 
@@ -408,7 +409,7 @@ int main(int argc, char** argv)
 
             if (ImGui::BeginPopupModal("delete playlist", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
             {
-                const auto& playlist = g_playlists[g_currentPlaylistIndex];
+                const auto& playlist = g_playlists[g_viewPlaylistIndex];
                 ImGui::Text("delete playlist \"%s\" ?", playlist.name.c_str());
                 if (ImGui::Button("delete"))
                 {
@@ -419,6 +420,7 @@ int main(int argc, char** argv)
                         if (g_playlists[j].name == "library")
                         {
                             g_currentPlaylistIndex = j;
+                            g_viewPlaylistIndex = j;
                             break;
                         }
                     }
@@ -454,7 +456,6 @@ int main(int argc, char** argv)
             ImGui::PopStyleColor();
 
             // Toolbar
-            if(g_playlists[g_viewPlaylistIndex].name == "library"){
                 if (ImGui::Button("open folder"))
                 {
                     if (!g_scanning)
@@ -462,13 +463,16 @@ int main(int argc, char** argv)
                         const char* folder = tinyfd_selectFolderDialog("select music folder", "");
                         if (folder)
                         {
-                            start_folder_scan(folder);
+                            if(g_playlists[g_viewPlaylistIndex].name != "library"){
+                                start_folder_scan(folder, true, g_playlists[g_viewPlaylistIndex].name);
+                            }else{
+                                start_folder_scan(folder, false, g_playlists[g_viewPlaylistIndex].name);
+                            }
                         }
                     }
                 }
 
                 ImGui::SameLine();
-            }
             if(g_playlists[g_viewPlaylistIndex].name != "library"){
                 if (ImGui::Button("add songs"))
                 {
