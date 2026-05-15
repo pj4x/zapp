@@ -1,3 +1,2 @@
-- Fix playlist change while playing
 - change theme menu
 - change buffer size menu

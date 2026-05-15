@@ -17,6 +17,7 @@ inline std::atomic<bool> g_hasPreloadedForCurrentSong = false;
 inline std::vector<SongInfo> g_allSongs;          // All songs with IDs
 inline std::vector<Playlist> g_playlists;         // All playlists (includes "library")
 inline int g_currentPlaylistIndex = -1;           // Index of currently open playlist for playback
+inline int g_viewPlaylistIndex = -1;
 inline std::mutex g_songMutex;
 inline std::atomic<bool> g_scanning = false;
 inline std::string g_scanStatus = "";

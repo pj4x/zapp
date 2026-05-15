@@ -1,5 +1,6 @@
 #include <SDL.h>
 #include <iostream>
+#include <ostream>
 #include <vector>
 #include <string>
 #include <atomic>
@@ -14,6 +15,7 @@
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
 #include "backends/imgui_impl_sdlrenderer2.h"
+#include "includes/zapp/globals.h"
 
 // JSON library (single header - https://github.com/nlohmann/json)
 #include <nlohmann/json.hpp>
@@ -59,6 +61,8 @@ int main(int argc, char** argv)
             break;
         }
     }
+    // set view Playlist index to playback playlist index
+    g_viewPlaylistIndex = g_currentPlaylistIndex;
 
     // --------------------------------------------------------
     // SDL Init
@@ -154,7 +158,7 @@ int main(int argc, char** argv)
         ImGui::NewFrame();
 
         // preload next song to cache
-        if(gAudio.playing && !g_hasPreloadedForCurrentSong){
+        if(gPlayback.playing && !g_hasPreloadedForCurrentSong){
             preload_next_song_background();
             g_hasPreloadedForCurrentSong = true;
         }
@@ -315,7 +319,7 @@ int main(int argc, char** argv)
         ImGui::SameLine();
         if (ImGui::Button("delete"))
         {
-            if(g_playlists[g_currentPlaylistIndex].name != "library"){
+            if(g_playlists[g_viewPlaylistIndex].name != "library"){
                 showDeletePlaylistPopup = true;
             }
         }
@@ -327,13 +331,13 @@ int main(int argc, char** argv)
         for (size_t i = 0; i < g_playlists.size(); ++i)
         {
             const auto& playlist = g_playlists[i];
-            bool isSelected = (g_currentPlaylistIndex == (int)i);
+            bool isSelected = (g_viewPlaylistIndex == (int)i);
 
             std::string displayName = playlist.name;
 
             if (ImGui::Selectable(displayName.c_str(), isSelected))
             {
-                g_currentPlaylistIndex = i;
+                g_viewPlaylistIndex = i;
             }
 
         }
@@ -410,15 +414,15 @@ int main(int argc, char** argv)
             ImGuiWindowFlags_NoResize;
 
         std::string playlistTitle = "";
-        if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
-            playlistTitle += g_playlists[g_currentPlaylistIndex].name;
+        if (g_viewPlaylistIndex >= 0 && g_viewPlaylistIndex < (int)g_playlists.size())
+            playlistTitle += g_playlists[g_viewPlaylistIndex].name;
         else
             playlistTitle += "none";
 
         ImGui::Begin(playlistTitle.c_str(), nullptr, playlistWindowFlags);
 
         // Toolbar
-        if(g_playlists[g_currentPlaylistIndex].name == "library"){
+        if(g_playlists[g_viewPlaylistIndex].name == "library"){
             if (ImGui::Button("open folder"))
             {
                 if (!g_scanning)
@@ -433,12 +437,13 @@ int main(int argc, char** argv)
 
             ImGui::SameLine();
         }
-        if (ImGui::Button("add songs") && g_playlists[g_currentPlaylistIndex].name != "library")
-        {
-            g_showAddFromLibraryPopup = true;
-            memset(addFilter, 0, sizeof(addFilter));
+        if(g_playlists[g_viewPlaylistIndex].name != "library"){
+            if (ImGui::Button("add songs"))
+            {
+                g_showAddFromLibraryPopup = true;
+                memset(addFilter, 0, sizeof(addFilter));
+            }
         }
-
         ImGui::SameLine();
         ImGui::Text("total songs: %zu", g_allSongs.size());
 
@@ -459,9 +464,9 @@ int main(int argc, char** argv)
 
         ImGui::BeginChild("PlaylistSongs", ImVec2(0, 0), true);
 
-        if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
+        if (g_viewPlaylistIndex >= 0 && g_viewPlaylistIndex < (int)g_playlists.size())
         {
-            std::vector<SongInfo> playlistSongs = get_playlist_songs(g_playlists[g_currentPlaylistIndex]);
+            std::vector<SongInfo> playlistSongs = get_playlist_songs(g_playlists[g_viewPlaylistIndex]);
 
             for (const auto& song : playlistSongs)
             {
@@ -510,6 +515,8 @@ int main(int argc, char** argv)
                 ImGui::SetCursorScreenPos(titleMin);
                 if (ImGui::Selectable("##title_select", false, ImGuiSelectableFlags_None, ImVec2(titleMax.x - titleMin.x, titleMax.y - titleMin.y)))
                 {
+                    // set playback playlist index to view playlist index
+                    g_currentPlaylistIndex = g_viewPlaylistIndex;
                     // safety check
                     if (song.id >= 0) {
                         if (play_song_by_id(song.id))
@@ -589,9 +596,9 @@ int main(int argc, char** argv)
                 if (ImGui::Selectable(displayText.c_str()))
                 {
                     // Add to current playlist
-                    if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
+                    if (g_viewPlaylistIndex >= 0 && g_viewPlaylistIndex < (int)g_playlists.size())
                     {
-                        const std::string& playlistName = g_playlists[g_currentPlaylistIndex].name;
+                        const std::string& playlistName = g_playlists[g_viewPlaylistIndex].name;
                         add_song_to_playlist(playlistName, song.id);
                     }
                 }
