@@ -506,6 +506,9 @@ int main(int argc, char** argv)
                 {
                     g_cachedPlaylistSongs = get_playlist_songs(g_playlists[g_viewPlaylistIndex]);
                     g_cachedViewPlaylistIndex = g_viewPlaylistIndex;
+                } else if (g_songlistUpdate){
+                    g_songlistUpdate = false;
+                    g_cachedPlaylistSongs = get_playlist_songs(g_playlists[g_viewPlaylistIndex]);
                 }
                 const std::vector<SongInfo>& playlistSongs = g_cachedPlaylistSongs;
 

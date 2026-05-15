@@ -197,6 +197,7 @@ inline void save_playlists_worker(const std::vector<Playlist>& playlists)
 inline void save_playlists_database_async(const std::vector<Playlist>& playlists)
 {
     if (g_savingPlaylists) return; // Already saving, skip
+    g_songlistUpdate = true;
 
     // Make a copy of the playlists to save (in case the original changes)
     std::vector<Playlist> playlistsCopy = playlists;

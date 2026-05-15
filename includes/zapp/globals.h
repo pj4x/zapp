@@ -60,4 +60,7 @@ inline std::mutex g_saveMutex;
 inline std::atomic<bool> g_incrementPlayCount = false;
 inline std::atomic<int> g_songToIncrement = -1;
 
+// ui update
+inline bool g_songlistUpdate = false;
+
 #endif
