@@ -80,6 +80,7 @@ SongInfo g_nowPlaying;
 std::mutex g_songMutex;
 std::atomic<bool> g_scanning = false;
 std::string g_scanStatus = "";
+std::atomic<bool> g_requestNextSong = false;  // Set by audio thread when song ends
 
 // For "Add to playlist" popup
 int g_selectedSongForPlaylist = -1;
@@ -469,6 +470,20 @@ std::vector<SongInfo> get_playlist_songs(const Playlist& playlist)
     return songs;
 }
 
+// Get the next song in the current playlist
+int get_next_song_in_playlist(int currentSongId)
+{
+    if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
+        return -1;
+
+    const auto& playlist = g_playlists[g_currentPlaylistIndex];
+    auto it = std::find(playlist.songIds.begin(), playlist.songIds.end(), currentSongId);
+    if (it == playlist.songIds.end() || it + 1 == playlist.songIds.end())
+        return -1;
+
+    return *(it + 1);
+}
+
 // ------------------------------------------------------------
 // Folder Scanning (Worker Thread)
 // ------------------------------------------------------------
@@ -611,6 +626,22 @@ bool load_mp3(const std::string& path)
     return true;
 }
 
+// Play a song by its ID
+bool play_song_by_id(int songId)
+{
+    auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+        [songId](const SongInfo& s) { return s.id == songId; });
+    if (it != g_allSongs.end())
+    {
+        if (load_mp3(it->path))
+        {
+            g_nowPlaying = *it;
+            return true;
+        }
+    }
+    return false;
+}
+
 // ------------------------------------------------------------
 // Audio Callback (thread-safe)
 // ------------------------------------------------------------
@@ -636,7 +667,11 @@ void audio_callback(void* userdata, Uint8* stream, int len)
     {
         if (currentSample >= totalSamples)
         {
-            audio->playing = false;
+            if (audio->playing)  // Only trigger once when song ends
+            {
+                audio->playing = false;
+                g_requestNextSong = true;  // Signal main thread to play next song
+            }
             break;
         }
 
@@ -904,6 +939,26 @@ int main(int argc, char** argv)
         ImGui::NewFrame();
 
         // ----------------------------------------------------
+        // Auto-play next song when current finishes
+        // ----------------------------------------------------
+
+        if (g_requestNextSong)
+        {
+            g_requestNextSong = false;  // Reset flag
+
+            int nextId = get_next_song_in_playlist(g_nowPlaying.id);
+            if (nextId != -1)
+            {
+                play_song_by_id(nextId);
+            }
+            else
+            {
+                // go back to start if playlist over
+                play_song_by_id(g_playlists[g_currentPlaylistIndex].songIds[0]);
+            }
+        }
+
+        // ----------------------------------------------------
         // Player Window (Top Left)
         // ----------------------------------------------------
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Appearing);
@@ -1036,8 +1091,8 @@ int main(int argc, char** argv)
 
         if (ImGui::BeginPopupModal("create playlist", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         {
-            ImGui::InputText("Name", newPlaylistName, sizeof(newPlaylistName));
-            if (ImGui::Button("Create"))
+            ImGui::InputText("name", newPlaylistName, sizeof(newPlaylistName));
+            if (ImGui::Button("create"))
             {
                 if (strlen(newPlaylistName) > 0 && create_playlist(newPlaylistName))
                 {
@@ -1045,7 +1100,7 @@ int main(int argc, char** argv)
                 }
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel"))
+            if (ImGui::Button("cancel"))
             {
                 ImGui::CloseCurrentPopup();
             }
@@ -1078,7 +1133,7 @@ int main(int argc, char** argv)
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel"))
+            if (ImGui::Button("cancel"))
             {
                 ImGui::CloseCurrentPopup();
             }
