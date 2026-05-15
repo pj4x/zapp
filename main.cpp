@@ -9,6 +9,7 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 #include "imgui.h"
 #include "backends/imgui_impl_sdl2.h"
@@ -30,14 +31,25 @@
 #include "minimp3_ex.h"
 
 // ------------------------------------------------------------
-// Song Info Structure
+// Song Info Structure with ID
 // ------------------------------------------------------------
 
 struct SongInfo
 {
+    int id = -1;
     std::string path;
     std::string title;
     std::string artist;
+};
+
+// ------------------------------------------------------------
+// Playlist Structure
+// ------------------------------------------------------------
+
+struct Playlist
+{
+    std::string name;
+    std::vector<int> songIds;  // IDs of songs in this playlist
 };
 
 // ------------------------------------------------------------
@@ -61,11 +73,20 @@ struct AudioState
 };
 
 AudioState gAudio;
-std::vector<SongInfo> g_songList;
+std::vector<SongInfo> g_allSongs;          // All songs with IDs
+std::vector<Playlist> g_playlists;         // All playlists (includes "library")
+int g_currentPlaylistIndex = -1;           // Index of currently open playlist
 SongInfo g_nowPlaying;
 std::mutex g_songMutex;
 std::atomic<bool> g_scanning = false;
 std::string g_scanStatus = "";
+
+// For "Add to playlist" popup
+int g_selectedSongForPlaylist = -1;
+bool g_showAddToPlaylistPopup = false;
+
+// For "Add from Library" popup
+bool g_showAddFromLibraryPopup = false;
 
 // ------------------------------------------------------------
 // MP3 Metadata Extraction (ID3v1)
@@ -118,65 +139,333 @@ std::string get_filename_without_ext(const std::string& path)
     return p.stem().string();
 }
 
+// Convert Latin-1 (ISO-8859-1) to UTF-8
+std::string latin1_to_utf8(const std::string& latin1)
+{
+    std::string utf8;
+    for (unsigned char c : latin1)
+    {
+        if (c < 0x80)
+        {
+            utf8 += c;
+        }
+        else
+        {
+            utf8 += static_cast<char>(0xC0 | (c >> 6));
+            utf8 += static_cast<char>(0x80 | (c & 0x3F));
+        }
+    }
+    return utf8;
+}
+
+// Sanitize a string to ensure it contains only valid UTF-8 sequences
+std::string sanitize_utf8(const std::string& s)
+{
+    std::string result;
+    result.reserve(s.size());
+    for (size_t i = 0; i < s.size(); )
+    {
+        unsigned char c = s[i];
+        if (c < 0x80)
+        {
+            // ASCII
+            result += c;
+            ++i;
+        }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size())
+        {
+            // 2-byte UTF-8
+            unsigned char c2 = s[i+1];
+            if ((c2 & 0xC0) == 0x80)
+            {
+                result += c;
+                result += c2;
+                i += 2;
+            }
+            else
+            {
+                // invalid, skip
+                ++i;
+            }
+        }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < s.size())
+        {
+            // 3-byte UTF-8
+            unsigned char c2 = s[i+1];
+            unsigned char c3 = s[i+2];
+            if ((c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80)
+            {
+                result += c;
+                result += c2;
+                result += c3;
+                i += 3;
+            }
+            else
+            {
+                ++i;
+            }
+        }
+        else if ((c & 0xF8) == 0xF0 && i + 3 < s.size())
+        {
+            // 4-byte UTF-8
+            unsigned char c2 = s[i+1];
+            unsigned char c3 = s[i+2];
+            unsigned char c4 = s[i+3];
+            if ((c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80 && (c4 & 0xC0) == 0x80)
+            {
+                result += c;
+                result += c2;
+                result += c3;
+                result += c4;
+                i += 4;
+            }
+            else
+            {
+                ++i;
+            }
+        }
+        else
+        {
+            // invalid byte, skip
+            ++i;
+        }
+    }
+    return result;
+}
+
 void extract_metadata(const std::string& path, std::string& title, std::string& artist)
 {
-    if (!read_id3v1(path, title, artist))
+    bool has_id3 = false;
+    if (read_id3v1(path, title, artist))
+    {
+        // ID3v1 fields are Latin-1, convert to UTF-8
+        title = latin1_to_utf8(title);
+        artist = latin1_to_utf8(artist);
+        has_id3 = true;
+    }
+
+    if (!has_id3 || title.empty() || title.find_first_not_of(" \0") == std::string::npos)
     {
         title = get_filename_without_ext(path);
+        // Filename may already be UTF-8, but sanitize anyway
+        title = sanitize_utf8(title);
+    }
+
+    if (!has_id3 || artist.empty() || artist.find_first_not_of(" \0") == std::string::npos)
+    {
         artist = "Unknown Artist";
     }
 
-    if (title.empty()) title = get_filename_without_ext(path);
-    if (artist.empty()) artist = "Unknown Artist";
+    // Final sanitization to be safe
+    title = sanitize_utf8(title);
+    artist = sanitize_utf8(artist);
 }
 
 // ------------------------------------------------------------
-// JSON Database Functions
+// JSON Database Functions (Songs)
 // ------------------------------------------------------------
 
-const std::string DB_FILENAME = "songs_db.json";
+const std::string SONGS_DB_FILENAME = "songs_db.json";
 
-void save_database(const std::vector<SongInfo>& songs)
+void save_songs_database(const std::vector<SongInfo>& songs)
 {
     nlohmann::json j;
     for (const auto& song : songs)
     {
         nlohmann::json songJson;
+        songJson["id"] = song.id;
         songJson["path"] = song.path;
         songJson["title"] = song.title;
         songJson["artist"] = song.artist;
         j.push_back(songJson);
     }
 
-    std::ofstream file(DB_FILENAME);
+    std::ofstream file(SONGS_DB_FILENAME);
     if (file.is_open())
     {
         file << j.dump(4);
     }
 }
 
-std::vector<SongInfo> load_database()
+std::vector<SongInfo> load_songs_database()
 {
     std::vector<SongInfo> songs;
 
-    std::ifstream file(DB_FILENAME);
+    std::ifstream file(SONGS_DB_FILENAME);
     if (!file.is_open()) return songs;
+
+    nlohmann::json j;
+    file >> j;
+
+    int maxId = 0;
+    for (const auto& item : j)
+    {
+        SongInfo song;
+        if (item.contains("id"))
+            song.id = item["id"];
+        else
+            song.id = -1; // will assign later
+
+        song.path = item.value("path", "");
+        song.title = item.value("title", "");
+        song.artist = item.value("artist", "");
+        if (!song.path.empty())
+        {
+            // sanitize song title and artist name
+            song.title = sanitize_utf8(song.title);
+            song.artist = sanitize_utf8(song.artist);
+            songs.push_back(song);
+            if (song.id > maxId) maxId = song.id;
+        }
+    }
+
+    // Assign IDs to songs that don't have them (legacy database)
+    bool needsSave = false;
+    for (auto& song : songs)
+    {
+        if (song.id == -1)
+        {
+            song.id = ++maxId;
+            needsSave = true;
+        }
+    }
+
+    if (needsSave)
+        save_songs_database(songs);
+
+    return songs;
+}
+
+// ------------------------------------------------------------
+// Playlist Database Functions
+// ------------------------------------------------------------
+
+const std::string PLAYLISTS_DB_FILENAME = "playlists.json";
+
+void save_playlists_database(const std::vector<Playlist>& playlists)
+{
+    nlohmann::json j;
+    for (const auto& pl : playlists)
+    {
+        nlohmann::json plJson;
+        plJson["name"] = pl.name;
+        plJson["songIds"] = pl.songIds;
+        j.push_back(plJson);
+    }
+
+    std::ofstream file(PLAYLISTS_DB_FILENAME);
+    if (file.is_open())
+    {
+        file << j.dump(4);
+    }
+}
+
+std::vector<Playlist> load_playlists_database()
+{
+    std::vector<Playlist> playlists;
+
+    std::ifstream file(PLAYLISTS_DB_FILENAME);
+    if (!file.is_open()) return playlists;
 
     nlohmann::json j;
     file >> j;
 
     for (const auto& item : j)
     {
-        SongInfo song;
-        song.path = item.value("path", "");
-        song.title = item.value("title", "");
-        song.artist = item.value("artist", "");
-        if (!song.path.empty())
-        {
-            songs.push_back(song);
-        }
+        Playlist pl;
+        pl.name = item.value("name", "");
+        if (item.contains("songIds"))
+            pl.songIds = item["songIds"].get<std::vector<int>>();
+        if (!pl.name.empty())
+            playlists.push_back(pl);
     }
 
+    return playlists;
+}
+
+// Ensure "library" playlist exists and contains all song IDs
+void ensure_library_playlist()
+{
+    // Find library playlist
+    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
+        [](const Playlist& p) { return p.name == "library"; });
+
+    if (it == g_playlists.end())
+    {
+        // Create library playlist with all song IDs
+        Playlist library;
+        library.name = "library";
+        for (const auto& song : g_allSongs)
+            library.songIds.push_back(song.id);
+        g_playlists.push_back(library);
+    }
+    else
+    {
+        // Update library playlist to contain all song IDs
+        it->songIds.clear();
+        for (const auto& song : g_allSongs)
+            it->songIds.push_back(song.id);
+    }
+    save_playlists_database(g_playlists);
+}
+
+// Add a song to a playlist (avoid duplicates)
+bool add_song_to_playlist(const std::string& playlistName, int songId)
+{
+    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
+        [&](const Playlist& p) { return p.name == playlistName; });
+    if (it == g_playlists.end()) return false;
+
+    // Check for duplicate
+    if (std::find(it->songIds.begin(), it->songIds.end(), songId) != it->songIds.end())
+        return false; // Already in playlist
+
+    it->songIds.push_back(songId);
+    save_playlists_database(g_playlists);
+    return true;
+}
+
+// Create a new playlist
+bool create_playlist(const std::string& name)
+{
+    // Check if name already exists
+    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
+        [&](const Playlist& p) { return p.name == name; });
+    if (it != g_playlists.end()) return false;
+
+    Playlist newPlaylist;
+    newPlaylist.name = name;
+    g_playlists.push_back(newPlaylist);
+    save_playlists_database(g_playlists);
+    return true;
+}
+
+// Delete a playlist (cannot delete "library")
+bool delete_playlist(const std::string& name)
+{
+    if (name == "library") return false;
+
+    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
+        [&](const Playlist& p) { return p.name == name; });
+    if (it == g_playlists.end()) return false;
+
+    g_playlists.erase(it);
+    save_playlists_database(g_playlists);
+    return true;
+}
+
+// Get songs for a playlist (returns vector of full SongInfo)
+std::vector<SongInfo> get_playlist_songs(const Playlist& playlist)
+{
+    std::vector<SongInfo> songs;
+    std::lock_guard<std::mutex> lock(g_songMutex);
+    for (int id : playlist.songIds)
+    {
+        auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+            [id](const SongInfo& s) { return s.id == id; });
+        if (it != g_allSongs.end())
+            songs.push_back(*it);
+    }
     return songs;
 }
 
@@ -205,6 +494,9 @@ void scan_folder_worker(const std::string& folderPath)
                 {
                     SongInfo song;
                     song.path = entry.path().string();
+                    // sanitize
+                    song.title = sanitize_utf8(song.title);
+                    song.artist = sanitize_utf8(song.artist);
                     extract_metadata(song.path, song.title, song.artist);
                     newSongs.push_back(song);
 
@@ -220,16 +512,31 @@ void scan_folder_worker(const std::string& folderPath)
 
     if (g_scanning)
     {
-        // Save to database
-        save_database(newSongs);
+        // Assign new IDs and merge with existing songs (avoid duplicates by path)
+        std::lock_guard<std::mutex> lock(g_songMutex);
+        int maxId = 0;
+        for (const auto& song : g_allSongs)
+            if (song.id > maxId) maxId = song.id;
 
-        // Update global song list
+        for (auto& song : newSongs)
         {
-            std::lock_guard<std::mutex> lock(g_songMutex);
-            g_songList = std::move(newSongs);
+            // Check if song already exists by path
+            auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+                [&](const SongInfo& s) { return s.path == song.path; });
+            if (it == g_allSongs.end())
+            {
+                song.id = ++maxId;
+                g_allSongs.push_back(song);
+            }
         }
 
-        g_scanStatus = "Scan complete! Found " + std::to_string(g_songList.size()) + " songs";
+        // Save songs database
+        save_songs_database(g_allSongs);
+
+        // Update library playlist
+        ensure_library_playlist();
+
+        g_scanStatus = "Scan complete! Found " + std::to_string(newSongs.size()) + " new songs";
     }
     else
     {
@@ -486,8 +793,22 @@ void SetHighContrastBlackAndWhiteTheme()
 int main(int argc, char** argv)
 {
     // Load song database
-    g_songList = load_database();
-    std::cout << "Loaded " << g_songList.size() << " songs from database\n";
+    g_allSongs = load_songs_database();
+    std::cout << "Loaded " << g_allSongs.size() << " songs from database\n";
+
+    // Load playlists
+    g_playlists = load_playlists_database();
+    ensure_library_playlist(); // Make sure library exists and is up-to-date
+
+    // Set initial current playlist to "library"
+    for (size_t i = 0; i < g_playlists.size(); ++i)
+    {
+        if (g_playlists[i].name == "library")
+        {
+            g_currentPlaylistIndex = i;
+            break;
+        }
+    }
 
     // --------------------------------------------------------
     // SDL Init
@@ -548,6 +869,16 @@ int main(int argc, char** argv)
 
     bool running = true;
 
+    // Popup state for "Add from Library"
+    static char addFilter[256] = "";
+
+    // Playlist creation popup
+    static char newPlaylistName[128] = "";
+    static bool showNewPlaylistPopup = false;
+
+    // Playlist deletion popup
+    static bool showDeletePlaylistPopup = false;
+
     // --------------------------------------------------------
     // Main Loop
     // --------------------------------------------------------
@@ -573,7 +904,7 @@ int main(int argc, char** argv)
         ImGui::NewFrame();
 
         // ----------------------------------------------------
-        // Player Window
+        // Player Window (Top Left)
         // ----------------------------------------------------
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Appearing);
         ImGui::SetNextWindowSize(ImVec2(400, 250), ImGuiCond_Appearing);
@@ -654,22 +985,130 @@ int main(int argc, char** argv)
         ImGui::End();
 
         // ----------------------------------------------------
-        // Songs List Window
+        // Playlists Window (Bottom Left)
+        // ----------------------------------------------------
+        ImGui::SetNextWindowPos(ImVec2(10, 270), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSize(ImVec2(400, 320), ImGuiCond_Appearing);
+
+        ImGui::Begin("playlists", nullptr);
+
+        if (ImGui::Button("new"))
+        {
+            showNewPlaylistPopup = true;
+            memset(newPlaylistName, 0, sizeof(newPlaylistName));
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("delete"))
+        {
+            if(g_playlists[g_currentPlaylistIndex].name != "library"){
+                showDeletePlaylistPopup = true;
+            }
+        }
+
+        ImGui::Separator();
+
+        ImGui::BeginChild("PlaylistList", ImVec2(0, 0), true);
+
+        for (size_t i = 0; i < g_playlists.size(); ++i)
+        {
+            const auto& playlist = g_playlists[i];
+            bool isSelected = (g_currentPlaylistIndex == (int)i);
+
+            std::string displayName = playlist.name;
+
+            if (ImGui::Selectable(displayName.c_str(), isSelected))
+            {
+                g_currentPlaylistIndex = i;
+            }
+
+        }
+
+        ImGui::EndChild();
+        ImGui::End();
+
+        // New Playlist Popup
+        if (showNewPlaylistPopup)
+        {
+            ImGui::OpenPopup("create playlist");
+            showNewPlaylistPopup = false;
+        }
+
+        if (ImGui::BeginPopupModal("create playlist", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::InputText("Name", newPlaylistName, sizeof(newPlaylistName));
+            if (ImGui::Button("Create"))
+            {
+                if (strlen(newPlaylistName) > 0 && create_playlist(newPlaylistName))
+                {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Delete Playlist Popup
+        if (showDeletePlaylistPopup)
+        {
+            ImGui::OpenPopup("delete playlist");
+            showDeletePlaylistPopup = false;
+        }
+
+        if (ImGui::BeginPopupModal("delete playlist", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            const auto& playlist = g_playlists[g_currentPlaylistIndex];
+            ImGui::Text("delete playlist \"%s\" ?", playlist.name.c_str());
+            if (ImGui::Button("delete"))
+            {
+                delete_playlist(playlist.name);
+                // select library
+                for (size_t j = 0; j < g_playlists.size(); ++j)
+                {
+                    if (g_playlists[j].name == "library")
+                    {
+                        g_currentPlaylistIndex = j;
+                        break;
+                    }
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // ----------------------------------------------------
+        // Current Playlist Window (Right)
         // ----------------------------------------------------
         ImGui::SetNextWindowPos(ImVec2(420, 10), ImGuiCond_Appearing);
         ImGui::SetNextWindowSize(ImVec2(570, 580), ImGuiCond_Appearing);
 
-        ImGuiWindowFlags libraryFlags =
+        ImGuiWindowFlags playlistWindowFlags =
             ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoResize;
 
-        ImGui::Begin("library", nullptr, libraryFlags);
+        std::string playlistTitle = "";
+        if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
+            playlistTitle += g_playlists[g_currentPlaylistIndex].name;
+        else
+            playlistTitle += "none";
 
+        ImGui::Begin(playlistTitle.c_str(), nullptr, playlistWindowFlags);
+
+        // Toolbar
         if (ImGui::Button("open folder"))
         {
             if (!g_scanning)
             {
-                const char* folder = tinyfd_selectFolderDialog("Select Music Folder", "");
+                const char* folder = tinyfd_selectFolderDialog("select music folder", "");
                 if (folder)
                 {
                     start_folder_scan(folder);
@@ -677,17 +1116,16 @@ int main(int argc, char** argv)
             }
         }
 
-
         ImGui::SameLine();
 
-        if (ImGui::Button("refresh"))
+        if (ImGui::Button("add songs") && g_playlists[g_currentPlaylistIndex].name != "library")
         {
-            std::lock_guard<std::mutex> lock(g_songMutex);
-            g_songList = load_database();
+            g_showAddFromLibraryPopup = true;
+            memset(addFilter, 0, sizeof(addFilter));
         }
 
         ImGui::SameLine();
-        ImGui::Text("total songs: %zu", g_songList.size());
+        ImGui::Text("total songs: %zu", g_allSongs.size());
 
         ImGui::SameLine();
 
@@ -700,21 +1138,20 @@ int main(int argc, char** argv)
 
         ImGui::Separator();
 
-        // Song list with filtering
-        static char filter[256] = "";
-        ImGui::InputText("filter", filter, sizeof(filter));
+        // Song filter for current playlist
+        static char playlistFilter[256] = "";
+        ImGui::InputText("filter", playlistFilter, sizeof(playlistFilter));
 
-        ImGui::BeginChild("SongList", ImVec2(0, 0), true);
+        ImGui::BeginChild("PlaylistSongs", ImVec2(0, 0), true);
 
+        if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
         {
-            std::lock_guard<std::mutex> lock(g_songMutex);
+            std::vector<SongInfo> playlistSongs = get_playlist_songs(g_playlists[g_currentPlaylistIndex]);
 
-            for (size_t i = 0; i < g_songList.size(); ++i)
+            for (const auto& song : playlistSongs)
             {
-                const auto& song = g_songList[i];
-
                 // Apply filter
-                std::string filterLower = filter;
+                std::string filterLower = playlistFilter;
                 std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
 
                 std::string titleLower = song.title;
@@ -729,22 +1166,172 @@ int main(int argc, char** argv)
                     continue;
                 }
 
-                std::string displayText = song.title + " - " + song.artist;
+                /// Push ID
+                ImGui::PushID(song.id);
 
-                if (ImGui::Selectable(displayText.c_str()))
+                // Calculate available width (reserve space for + button)
+                float availableWidth = ImGui::GetContentRegionAvail().x - 50;
+
+                // Create a child area for this song to handle layout automatically
+                ImGui::BeginGroup();
+
+                // Create selectable that wraps with custom height
+                ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+                ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.3f, 0.3f, 0.3f, 0.3f));
+                ImGui::PushStyleColor(ImGuiCol_HeaderActive, ImVec4(0.2f, 0.2f, 0.2f, 0.3f));
+
+                // Draw title with wrapping
+                ImGui::SetWindowFontScale(1.2f);
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + availableWidth);
+                ImGui::TextWrapped("%s", song.title.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::SetWindowFontScale(1.0f);
+
+                // Get the rect of the title text
+                ImVec2 titleMin = ImGui::GetItemRectMin();
+                ImVec2 titleMax = ImGui::GetItemRectMax();
+
+                // Create a selectable that covers the title area
+                ImGui::SetCursorScreenPos(titleMin);
+                if (ImGui::Selectable("##title_select", false, ImGuiSelectableFlags_None, ImVec2(titleMax.x - titleMin.x, titleMax.y - titleMin.y)))
                 {
-                    // Load selected song
                     if (load_mp3(song.path))
                     {
                         std::cout << "Now playing: " << song.title << "\n";
                         g_nowPlaying = song;
                     }
                 }
+                ImGui::PopStyleColor(3);
+
+                // Artist text
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                ImGui::TextWrapped("%s", song.artist.c_str());
+                ImGui::PopStyleColor();
+
+                ImGui::EndGroup();
+
+                // Add button
+                ImGui::SameLine();
+                ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 50);
+                if (ImGui::Button("+"))
+                {
+                    g_selectedSongForPlaylist = song.id;
+                    g_showAddToPlaylistPopup = true;
+                }
+
+                ImGui::PopID();
+                ImGui::Spacing();
+                ImGui::Separator();
             }
         }
 
         ImGui::EndChild();
         ImGui::End();
+
+        // ----------------------------------------------------
+        // Add from Library Popup
+        // ----------------------------------------------------
+        if (g_showAddFromLibraryPopup)
+        {
+            ImGui::OpenPopup("add songs##popup");
+            g_showAddFromLibraryPopup = false;
+        }
+
+        if (ImGui::BeginPopupModal("add songs##popup", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::InputText("search", addFilter, sizeof(addFilter));
+
+            ImGui::BeginChild("LibrarySongs", ImVec2(500, 300), true);
+
+            for (const auto& song : g_allSongs)
+            {
+                std::string filterLower = addFilter;
+                std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
+                std::string titleLower = song.title;
+                std::string artistLower = song.artist;
+                std::transform(titleLower.begin(), titleLower.end(), titleLower.begin(), ::tolower);
+                std::transform(artistLower.begin(), artistLower.end(), artistLower.begin(), ::tolower);
+
+                if (!filterLower.empty() &&
+                    titleLower.find(filterLower) == std::string::npos &&
+                    artistLower.find(filterLower) == std::string::npos)
+                    continue;
+
+                std::string displayText = song.title + " - " + song.artist;
+                if (ImGui::Selectable(displayText.c_str()))
+                {
+                    // Add to current playlist
+                    if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
+                    {
+                        const std::string& playlistName = g_playlists[g_currentPlaylistIndex].name;
+                        if (add_song_to_playlist(playlistName, song.id))
+                        {
+                            // Success
+                        }
+                        else
+                        {
+                            // Could show a tooltip, but ignore for now
+                        }
+                    }
+                }
+            }
+
+            ImGui::EndChild();
+
+            if (ImGui::Button("close"))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // ----------------------------------------------------
+        // Add to Playlist Popup (appears when clicking + on a song)
+        // ----------------------------------------------------
+        if (g_showAddToPlaylistPopup)
+        {
+            ImGui::OpenPopup("add to playlist##choice");
+            g_showAddToPlaylistPopup = false;
+        }
+
+        if (ImGui::BeginPopupModal("add to playlist##choice", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            // Get song name for display
+            std::string songName = "unknown";
+            {
+                std::lock_guard<std::mutex> lock(g_songMutex);
+                auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+                    [](const SongInfo& s) { return s.id == g_selectedSongForPlaylist; });
+                if (it != g_allSongs.end())
+                    songName = it->title + " by " + it->artist;
+            }
+            ImGui::TextColored(ImVec4(0,1,0,1), "%s", songName.c_str());
+
+            ImGui::Separator();
+
+            for (const auto& playlist : g_playlists)
+            {
+                // Skip library
+                if(playlist.name != "library"){
+                    if (ImGui::Selectable(playlist.name.c_str()))
+                    {
+                        if (add_song_to_playlist(playlist.name, g_selectedSongForPlaylist))
+                        {
+                            // Success
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::Spacing();
+                }
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("cancel"))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
 
         // ----------------------------------------------------
         // Render
