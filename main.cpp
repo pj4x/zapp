@@ -18,6 +18,7 @@
 #include "includes/zapp/database.h"
 #include "includes/zapp/globals.h"
 #include "includes/zapp/helperImgui.h"
+#include "includes/zapp/visualizer.h"
 
 #include <nlohmann/json.hpp>
 
@@ -37,6 +38,7 @@
 #include "audio.h"
 #include "helperImgui.h"
 #include "helperSdl.h"
+#include "visualizer.h"
 
 // ------------------------------------------------------------
 // Main
@@ -322,14 +324,15 @@ int main(int argc, char** argv)
                 SDL_UnlockAudio();
             }
 
-            // Audio Info
+            // Waveform Visualizer
             ImGui::Separator();
-            {
-                std::lock_guard<std::mutex> lock(gPlayback.mutex);
-                ImGui::Text("Sample Rate: %d Hz", gPlayback.mp3SampleRate);
-                ImGui::Text("Channels: %d", gPlayback.channels);
-                ImGui::Text("Total Frames: %zu", gPlayback.totalFrames);
-            }
+
+            // Calculate visualizer size
+            float visualizerWidth = ImGui::GetContentRegionAvail().x;
+            float visualizerHeight = 120.0f;  // Adjust as needed
+
+            // Draw the waveform visualizer
+            draw_fft_spectrum(visualizerWidth, visualizerHeight);
 
             ImGui::End();
 

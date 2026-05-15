@@ -14,6 +14,9 @@
 #include "globals.h"
 #include "audio.h"
 
+// Forward declaration
+void audio_callback(void* userdata, Uint8* stream, int len);
+
 // Reconfigure audio device for different sample rate/channels
 inline bool ReconfigureAudio(int sampleRate, int channels)
 {

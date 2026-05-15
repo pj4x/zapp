@@ -13,19 +13,20 @@
 #include "definitions.h"
 #include "globals.h"
 #include "helpers.h"
+#include "visualizer.h"
 
 // ------------------------------------------------------------
 // Audio Callback (thread-safe)
 // ------------------------------------------------------------
 
-inline void audio_callback(void* userdata, Uint8* stream, int len)
-{
+inline void audio_callback(void* userdata, Uint8* stream, int len) {
     AudioPlayback* audio = (AudioPlayback*)userdata;
 
     SDL_memset(stream, 0, len);
 
-    if (!audio->playing)
+    if (!audio->playing || !audio->pcm) {
         return;
+    }
 
     std::lock_guard<std::mutex> lock(audio->mutex);
 
@@ -36,12 +37,13 @@ inline void audio_callback(void* userdata, Uint8* stream, int len)
     size_t currentSample = audio->currentFrame * samplesPerFrame;
     size_t totalSamples = audio->totalFrames * samplesPerFrame;
 
-    for (int i = 0; i < floatCount; i += samplesPerFrame)
-    {
-        if (currentSample >= totalSamples)
-        {
-            if (audio->playing)
-            {
+    // Buffer for spectrum analysis
+    static std::vector<float> spectrumBuffer;
+    spectrumBuffer.clear();
+
+    for (int i = 0; i < floatCount; i += samplesPerFrame) {
+        if (currentSample >= totalSamples) {
+            if (audio->playing) {
                 audio->playing = false;
                 g_requestNextSong = true;
                 g_incrementPlayCount = true;
@@ -50,19 +52,22 @@ inline void audio_callback(void* userdata, Uint8* stream, int len)
             break;
         }
 
-        // Copy the samples
-        for (int c = 0; c < samplesPerFrame; c++)
-        {
-            if (currentSample + c < totalSamples)
-                out[i + c] = audio->pcm[currentSample + c];
-            else
-                out[i + c] = 0.0f;
+        // Copy samples
+        for (int c = 0; c < samplesPerFrame && currentSample + c < totalSamples; c++) {
+            out[i + c] = audio->pcm[currentSample + c];
+            if (c == 0) {  // Use left channel for spectrum
+                spectrumBuffer.push_back(std::abs(out[i + c]));
+            }
         }
 
         currentSample += samplesPerFrame;
     }
 
-    // Update current frame based on samples consumed
+    // Update spectrum visualization
+    if (!spectrumBuffer.empty()) {
+        update_audio_spectrum_fft(spectrumBuffer.data(), spectrumBuffer.size(), 1);
+    }
+
     audio->currentFrame = currentSample / samplesPerFrame;
 }
 
