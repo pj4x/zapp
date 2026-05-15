@@ -7,10 +7,7 @@ A minimal desktop MP3 player built with C++, SDL2, and Dear ImGui.
 * MP3 playback
 * Playlist management
 * Local music library support
-* Folder selection dialog
-* JSON-based song and playlist storage
-* SDL2 rendering and audio backend
-* Dear ImGui user interface
+* Recursive Folder scanning/import
 
 ## Dependencies
 
