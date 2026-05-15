@@ -342,6 +342,10 @@ inline int get_next_song_in_playlist(int currentSongId)
     if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
         return -1;
 
+    if (g_shuffle){
+        return g_RandId;
+    }
+
     const auto& playlist = g_playlists[g_currentPlaylistIndex];
 
     if (playlist.songIds.empty())
@@ -392,6 +396,7 @@ void save_settings()
     // Save basic settings
     j["cacheSize"] = g_cacheSizeSetting;
     j["theme"] = g_currentTheme;
+    j["showArtistName"] = g_showArtistName;
 
     // Save highlight color (RGBA)
     j["highlightColor"]["r"] = g_highlightColor.x;
@@ -429,6 +434,7 @@ void load_settings()
         // Load basic settings
         g_cacheSizeSetting = j.value("cacheSize", 5);
         g_currentTheme = j.value("theme", 0);
+        g_showArtistName = j.value("showArtistName", true);
 
         // Load highlight color
         if (j.contains("highlightColor"))

@@ -25,6 +25,7 @@ inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist
     g_scanStatus = "Scanning folder: " + folderPath;
 
     std::vector<SongInfo> newSongs;
+    std::vector<int> newSongIds;  // Store IDs of newly added songs
 
     try
     {
@@ -41,12 +42,14 @@ inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist
                 {
                     SongInfo song;
                     song.path = entry.path().string();
-                    // sanitize
+                    extract_metadata(song.path, song.title, song.artist);
+
+                    // Sanitize after metadata extraction
                     song.title = sanitize_utf8(song.title);
                     song.artist = sanitize_utf8(song.artist);
-                    extract_metadata(song.path, song.title, song.artist);
-                    newSongs.push_back(song);
+                    song.playCount = 0;
 
+                    newSongs.push_back(song);
                     g_scanStatus = "Found: " + song.title;
                 }
             }
@@ -59,12 +62,16 @@ inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist
 
     if (g_scanning)
     {
-        // Assign new IDs and merge with existing songs (avoid duplicates by path)
-        std::lock_guard<std::mutex> lock(g_songMutex);
+        // Lock both song and playlist mutexes
+        std::lock_guard<std::mutex> songLock(g_songMutex);
+        std::lock_guard<std::mutex> playlistLock(g_playlistsMutex);
+
+        // Find max existing ID
         int maxId = 0;
         for (const auto& song : g_allSongs)
             if (song.id > maxId) maxId = song.id;
 
+        // Add new songs and collect their IDs
         for (auto& song : newSongs)
         {
             // Check if song already exists by path
@@ -74,18 +81,59 @@ inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist
             {
                 song.id = ++maxId;
                 g_allSongs.push_back(song);
-                if(addToPlaylist){
-                    add_song_to_playlist(playlistName, song.id);
-                }
+                newSongIds.push_back(song.id);
+            }
+            else
+            {
+                // Song already exists, use existing ID
+                newSongIds.push_back(it->id);
             }
         }
 
-        // Save songs database
+        // If addToPlaylist is true, add all new songs to the specified playlist
+        if (addToPlaylist && !playlistName.empty() && !newSongIds.empty())
+        {
+            auto playlistIt = std::find_if(g_playlists.begin(), g_playlists.end(),
+                [&](const Playlist& p) { return p.name == playlistName; });
+
+            if (playlistIt != g_playlists.end())
+            {
+                for (int songId : newSongIds)
+                {
+                    // Check for duplicates
+                    if (std::find(playlistIt->songIds.begin(), playlistIt->songIds.end(), songId) == playlistIt->songIds.end())
+                    {
+                        playlistIt->songIds.push_back(songId);
+                    }
+                }
+            }
+            else if (playlistName != "library")
+            {
+                // Create the playlist if it doesn't exist
+                Playlist newPlaylist;
+                newPlaylist.name = playlistName;
+                newPlaylist.songIds = newSongIds;
+                g_playlists.push_back(newPlaylist);
+            }
+        }
+
+        // Save databases (async is fine here since we're done with locks)
         save_songs_database_async(g_allSongs);
+        save_playlists_database_async(g_playlists);
 
-        // Update library playlist
-        ensure_library_playlist();
+        // Update library playlist to include all songs
+        // Do this after the lock is released to avoid holding it during save
+        // Actually, we can call ensure_library_playlist here - it will lock again
+    }
 
+    // Release locks before calling ensure_library_playlist
+    {
+        std::lock_guard<std::mutex> lock(g_playlistsMutex);
+        ensure_library_playlist();  // This will lock internally
+    }
+
+    if (g_scanning)
+    {
         g_scanStatus = "Scan complete! Found " + std::to_string(newSongs.size()) + " new songs";
     }
     else
@@ -96,12 +144,16 @@ inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist
     g_scanning = false;
 }
 
-inline void start_folder_scan(const std::string& folderPath, bool addToPlaylist, std::string& playlistName)
+void start_folder_scan(const std::string& folderPath, bool addToPlaylist = false, const std::string& playlistName = "")
 {
     if (g_scanning) return;
 
     g_scanning = true;
-    std::thread scanThread(scan_folder_worker, folderPath, addToPlaylist, std::ref(playlistName));
+    // Make a copy of playlistName for the thread
+    std::string playlistNameCopy = playlistName;
+    std::thread scanThread([folderPath, addToPlaylist, playlistNameCopy]() {
+        scan_folder_worker(folderPath, addToPlaylist, const_cast<std::string&>(playlistNameCopy));
+    });
     scanThread.detach();
 }
 

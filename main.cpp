@@ -153,6 +153,16 @@ int main(int argc, char** argv)
         Uint32 windowFlags = SDL_GetWindowFlags(window);
         bool g_minimized = (windowFlags & SDL_WINDOW_MINIMIZED) != 0;
 
+            // chose next song randomly if shuffle is on
+            if(g_nextIdRand && g_shuffle){
+                g_nextIdRand = false;
+                int currentId = getCurrentPlayingId();
+                do {
+                    int randomIndex = rand() % g_playlists[g_currentPlaylistIndex].songIds.size();
+                    g_RandId = g_playlists[g_currentPlaylistIndex].songIds[randomIndex];
+                } while (g_RandId == currentId);
+            }
+
             // preload next song to cache
             if(gPlayback.playing && !g_hasPreloadedForCurrentSong){
                 preload_next_song_background();
@@ -271,6 +281,10 @@ int main(int argc, char** argv)
                     }
                 }
             }
+
+            ImGui::SameLine(0, 10);
+
+            ImGui::Checkbox("shuf", &g_shuffle);
 
             ImGui::Separator();
 
@@ -481,7 +495,7 @@ int main(int argc, char** argv)
                 }
             }
             ImGui::SameLine();
-            ImGui::Text("total songs: %zu", g_allSongs.size());
+            ImGui::Text("%zu songs", g_playlists[g_viewPlaylistIndex].songIds.size());
 
             ImGui::SameLine();
 
@@ -583,16 +597,18 @@ int main(int argc, char** argv)
                     ImGui::PopStyleColor(3);
 
                     // Artist text
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
-                    ImGui::TextWrapped("%s", song.artist.c_str());
-                    ImGui::PopStyleColor();
+                    if(g_showArtistName){
+                        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.6f, 0.6f, 0.6f, 1.0f));
+                        ImGui::TextWrapped("%s", song.artist.c_str());
+                        ImGui::PopStyleColor();
+                    }
 
                     ImGui::EndGroup();
 
                     // Option button
                     ImGui::SameLine();
                     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 50);
-                    if (ImGui::Button("▼"))
+                    if (ImGui::Button("opt"))
                     {
                         g_selectedSongForOptions = song;
                         g_showSongOptionsPopup = true;
@@ -795,6 +811,8 @@ int main(int argc, char** argv)
                         std::cout << "Theme changed to " << g_themeNames[g_currentTheme] << std::endl;
                     }
                 }
+
+                ImGui::Checkbox("show artist name", &g_showArtistName);
 
                 ImGui::Unindent();
                 ImGui::Spacing();

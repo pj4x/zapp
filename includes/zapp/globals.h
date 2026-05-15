@@ -17,6 +17,7 @@ inline std::atomic<bool> g_hasPreloadedForCurrentSong = false;
 
 inline std::vector<SongInfo> g_allSongs;          // All songs with IDs
 inline std::vector<Playlist> g_playlists;         // All playlists (includes "library")
+inline std::mutex g_playlistsMutex;
 inline int g_currentPlaylistIndex = -1;           // Index of currently open playlist for playback
 inline int g_viewPlaylistIndex = -1;
 inline std::mutex g_songMutex;
@@ -49,6 +50,10 @@ inline static int g_currentTheme = 0;  // 0=Dark, 1=Light, 2=High Contrast
 inline const char* g_themeNames[] = { "Dark Theme", "Light Theme", "High Contrast" };
 inline static int g_cacheSizeSetting = 10;
 inline static ImVec4 g_highlightColor = ImVec4(0.56f, 0.84f, 1.00f, 1.00f);  // Default: light-blue
+inline bool g_showArtistName = true;
+inline bool g_shuffle = false;
+inline bool g_nextIdRand = false;
+inline int g_RandId = -1;
 
 // For async saving
 inline std::atomic<bool> g_savingSongs = false;

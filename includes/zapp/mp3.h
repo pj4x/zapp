@@ -319,6 +319,7 @@ inline bool play_song_by_id(int songId)
 
     std::cout << "Now playing song ID " << songId << ": " << songInfo.title << std::endl;
     g_hasPreloadedForCurrentSong = false;
+    g_nextIdRand = true;
     return true;
 }
 
