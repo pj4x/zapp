@@ -117,19 +117,15 @@ inline void scan_folder_worker(const std::string& folderPath, bool addToPlaylist
             }
         }
 
-        // Save databases (async is fine here since we're done with locks)
+        // Save databases
         save_songs_database_async(g_allSongs);
         save_playlists_database_async(g_playlists);
-
-        // Update library playlist to include all songs
-        // Do this after the lock is released to avoid holding it during save
-        // Actually, we can call ensure_library_playlist here - it will lock again
     }
 
     // Release locks before calling ensure_library_playlist
     {
         std::lock_guard<std::mutex> lock(g_playlistsMutex);
-        ensure_library_playlist();  // This will lock internally
+        ensure_library_playlist();
     }
 
     if (g_scanning)
