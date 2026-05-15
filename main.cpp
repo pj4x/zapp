@@ -22,1105 +22,19 @@
 #define TINYFILEDIALOGS_IMPLEMENTATION
 #include "tinyfiledialogs.h"
 
-// ------------------------------------------------------------
 // minimp3
-// ------------------------------------------------------------
-
 #define MINIMP3_IMPLEMENTATION
 #define MINIMP3_FLOAT_OUTPUT
 #include "minimp3_ex.h"
 
-// ------------------------------------------------------------
-// Song Info Structure with ID
-// ------------------------------------------------------------
-
-struct SongInfo
-{
-    int id = -1;
-    std::string path;
-    std::string title;
-    std::string artist;
-    int playCount = 0;
-};
-
-// ------------------------------------------------------------
-// Playlist Structure
-// ------------------------------------------------------------
-
-struct Playlist
-{
-    std::string name;
-    std::vector<int> songIds;  // IDs of songs in this playlist
-};
-
-// ------------------------------------------------------------
-// Audio State
-// ------------------------------------------------------------
-
-struct AudioState
-{
-    std::vector<float> pcm;
-
-    int channels = 0;
-    int sampleRate = 0;
-
-    std::atomic<size_t> currentFrame = 0;
-
-    size_t totalFrames = 0;
-
-    std::atomic<bool> playing = false;
-
-    std::mutex mutex;
-};
-
-// Audio cache structure
-struct CachedAudio
-{
-    std::vector<float> pcm;
-    int channels = 0;
-    int sampleRate = 0;
-    size_t totalFrames = 0;
-    bool isValid = false;
-    std::chrono::steady_clock::time_point lastUsed;
-};
-
-std::unordered_map<int, CachedAudio> g_audioCache;
-std::mutex g_cacheMutex;
-std::atomic<bool> g_preloadingNext = false;
-const size_t MAX_CACHE_SIZE = 5; // Maximum number of songs to keep in cache (adjust as needed)
-
-AudioState gAudio;
-std::vector<SongInfo> g_allSongs;          // All songs with IDs
-std::vector<Playlist> g_playlists;         // All playlists (includes "library")
-int g_currentPlaylistIndex = -1;           // Index of currently open playlist
-SongInfo g_nowPlaying;
-std::mutex g_nowPlayingMutex;
-std::mutex g_songMutex;
-std::atomic<bool> g_scanning = false;
-std::string g_scanStatus = "";
-std::atomic<bool> g_requestNextSong = false;  // Set by audio thread when song ends
-
-// For "Add to playlist" popup
-SongInfo g_selectedSongForOptions;
-bool g_showSongOptionsPopup = false;
-bool g_showAddToPlaylistPopup = false;
-
-// For "Add from Library" popup
-bool g_showAddFromLibraryPopup = false;
-
-// For async saving
-std::atomic<bool> g_savingSongs = false;
-std::atomic<bool> g_savingPlaylists = false;
-std::string g_saveStatus = "";
-std::mutex g_saveMutex;
-std::atomic<bool> g_incrementPlayCount = false;
-std::atomic<int> g_songToIncrement = -1;
-
-// ------------------------------------------------------------
-// MP3 Metadata Extraction (ID3v1)
-// ------------------------------------------------------------
-
-bool read_id3v1(const std::string& path, std::string& title, std::string& artist)
-{
-    FILE* file = fopen(path.c_str(), "rb");
-    if (!file) return false;
-
-    // Seek to 128 bytes from end
-    fseek(file, -128, SEEK_END);
-
-    char tag[4] = {0};
-    fread(tag, 1, 3, file);
-    tag[3] = '\0';
-
-    if (strcmp(tag, "TAG") != 0)
-    {
-        fclose(file);
-        return false;
-    }
-
-    char titleBuf[31] = {0};
-    char artistBuf[31] = {0};
-
-    fread(titleBuf, 1, 30, file);
-    fread(artistBuf, 1, 30, file);
-
-    fclose(file);
-
-    // Trim trailing spaces and nulls
-    title = std::string(titleBuf);
-    artist = std::string(artistBuf);
-
-    auto trim = [](std::string& s) {
-        s.erase(s.find_last_not_of(" \0") + 1);
-        s.erase(0, s.find_first_not_of(" \0"));
-    };
-
-    trim(title);
-    trim(artist);
-
-    return true;
-}
-
-std::string get_filename_without_ext(const std::string& path)
-{
-    std::filesystem::path p(path);
-    return p.stem().string();
-}
-
-// Convert Latin-1 (ISO-8859-1) to UTF-8
-std::string latin1_to_utf8(const std::string& latin1)
-{
-    std::string utf8;
-    for (unsigned char c : latin1)
-    {
-        if (c < 0x80)
-        {
-            utf8 += c;
-        }
-        else
-        {
-            utf8 += static_cast<char>(0xC0 | (c >> 6));
-            utf8 += static_cast<char>(0x80 | (c & 0x3F));
-        }
-    }
-    return utf8;
-}
-
-// Sanitize a string to ensure it contains only valid UTF-8 sequences
-std::string sanitize_utf8(const std::string& s)
-{
-    std::string result;
-    result.reserve(s.size());
-    for (size_t i = 0; i < s.size(); )
-    {
-        unsigned char c = s[i];
-        if (c < 0x80)
-        {
-            // ASCII
-            result += c;
-            ++i;
-        }
-        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size())
-        {
-            // 2-byte UTF-8
-            unsigned char c2 = s[i+1];
-            if ((c2 & 0xC0) == 0x80)
-            {
-                result += c;
-                result += c2;
-                i += 2;
-            }
-            else
-            {
-                // invalid, skip
-                ++i;
-            }
-        }
-        else if ((c & 0xF0) == 0xE0 && i + 2 < s.size())
-        {
-            // 3-byte UTF-8
-            unsigned char c2 = s[i+1];
-            unsigned char c3 = s[i+2];
-            if ((c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80)
-            {
-                result += c;
-                result += c2;
-                result += c3;
-                i += 3;
-            }
-            else
-            {
-                ++i;
-            }
-        }
-        else if ((c & 0xF8) == 0xF0 && i + 3 < s.size())
-        {
-            // 4-byte UTF-8
-            unsigned char c2 = s[i+1];
-            unsigned char c3 = s[i+2];
-            unsigned char c4 = s[i+3];
-            if ((c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80 && (c4 & 0xC0) == 0x80)
-            {
-                result += c;
-                result += c2;
-                result += c3;
-                result += c4;
-                i += 4;
-            }
-            else
-            {
-                ++i;
-            }
-        }
-        else
-        {
-            // invalid byte, skip
-            ++i;
-        }
-    }
-    return result;
-}
-
-void extract_metadata(const std::string& path, std::string& title, std::string& artist)
-{
-    bool has_id3 = false;
-    if (read_id3v1(path, title, artist))
-    {
-        // ID3v1 fields are Latin-1, convert to UTF-8
-        title = latin1_to_utf8(title);
-        artist = latin1_to_utf8(artist);
-        has_id3 = true;
-    }
-
-    if (!has_id3 || title.empty() || title.find_first_not_of(" \0") == std::string::npos)
-    {
-        title = get_filename_without_ext(path);
-        // Filename may already be UTF-8, but sanitize anyway
-        title = sanitize_utf8(title);
-    }
-
-    if (!has_id3 || artist.empty() || artist.find_first_not_of(" \0") == std::string::npos)
-    {
-        artist = "Unknown Artist";
-    }
-
-    // Final sanitization to be safe
-    title = sanitize_utf8(title);
-    artist = sanitize_utf8(artist);
-}
-
-// ------------------------------------------------------------
-// JSON Database Functions (Songs)
-// ------------------------------------------------------------
-
-const std::string SONGS_DB_FILENAME = "songs_db.json";
-
-void save_songs_worker(const std::vector<SongInfo>& songs)
-{
-    g_savingSongs = true;
-    {
-        std::lock_guard<std::mutex> lock(g_saveMutex);
-        g_saveStatus = "Saving songs database...";
-    }
-
-    // Perform the actual file write
-    nlohmann::json j;
-    for (const auto& song : songs)
-    {
-        nlohmann::json songJson;
-        songJson["id"] = song.id;
-        songJson["path"] = song.path;
-        songJson["title"] = song.title;
-        songJson["artist"] = song.artist;
-        songJson["playCount"] = song.playCount;
-        j.push_back(songJson);
-    }
-
-    std::ofstream file(SONGS_DB_FILENAME);
-    if (file.is_open())
-    {
-        file << j.dump(4);
-        {
-            std::lock_guard<std::mutex> lock(g_saveMutex);
-            g_saveStatus = "Songs database saved successfully!";
-        }
-    }
-    else
-    {
-        {
-            std::lock_guard<std::mutex> lock(g_saveMutex);
-            g_saveStatus = "ERROR: Could not save songs database!";
-        }
-        std::cerr << "Failed to save songs database\n";
-    }
-
-    g_savingSongs = false;
-}
-
-void save_songs_database_async(const std::vector<SongInfo>& songs)
-{
-    if (g_savingSongs) return; // Already saving, skip
-
-    // Make a copy of the songs to save (in case the original changes)
-    std::vector<SongInfo> songsCopy = songs;
-
-    std::thread saveThread([songsCopy]() {
-        save_songs_worker(songsCopy);
-    });
-    saveThread.detach();
-}
-
-std::vector<SongInfo> load_songs_database()
-{
-    std::vector<SongInfo> songs;
-
-    std::ifstream file(SONGS_DB_FILENAME);
-    if (!file.is_open()) return songs;
-
-    nlohmann::json j;
-    try
-    {
-        file >> j;
-    }
-    catch (const std::exception& e)
-    {
-        std::cerr << "Error parsing songs database: " << e.what() << std::endl;
-        return songs;
-    }
-
-    int maxId = 0;
-    for (const auto& item : j)
-    {
-        SongInfo song;
-        if (item.contains("id"))
-            song.id = item["id"];
-        else
-            song.id = -1; // will assign later
-
-        song.path = item.value("path", "");
-        song.title = item.value("title", "");
-        song.artist = item.value("artist", "");
-        song.playCount = item.value("playCount", 0);
-        if (!song.path.empty())
-        {
-            // sanitize song title and artist name
-            song.title = sanitize_utf8(song.title);
-            song.artist = sanitize_utf8(song.artist);
-            songs.push_back(song);
-            if (song.id > maxId) maxId = song.id;
-        }
-    }
-
-    // Assign IDs to songs that don't have them (legacy database)
-    bool needsSave = false;
-    for (auto& song : songs)
-    {
-        if (song.id == -1)
-        {
-            song.id = ++maxId;
-            needsSave = true;
-        }
-    }
-
-    if (needsSave)
-        save_songs_database_async(songs);
-
-    return songs;
-}
-
-// Increment play count for a song and save to database
-void increment_play_count(int songId)
-{
-    std::lock_guard<std::mutex> lock(g_songMutex);
-    auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-        [songId](const SongInfo& s) { return s.id == songId; });
-    if (it != g_allSongs.end())
-    {
-        it->playCount++;
-        save_songs_database_async(g_allSongs);
-        std::cout << "Play count for " << it->title << " is now " << it->playCount << std::endl;
-    }
-}
-
-// ------------------------------------------------------------
-// Playlist Database Functions
-// ------------------------------------------------------------
-
-const std::string PLAYLISTS_DB_FILENAME = "playlists.json";
-
-void save_playlists_worker(const std::vector<Playlist>& playlists)
-{
-    g_savingPlaylists = true;
-    {
-        std::lock_guard<std::mutex> lock(g_saveMutex);
-        g_saveStatus = "Saving playlists database...";
-    }
-
-    // Perform the actual file write
-    nlohmann::json j;
-    for (const auto& pl : playlists)
-    {
-        nlohmann::json plJson;
-        plJson["name"] = pl.name;
-        plJson["songIds"] = pl.songIds;
-        j.push_back(plJson);
-    }
-
-    std::ofstream file(PLAYLISTS_DB_FILENAME);
-    if (file.is_open())
-    {
-        file << j.dump(4);
-        {
-            std::lock_guard<std::mutex> lock(g_saveMutex);
-            g_saveStatus = "Playlists database saved successfully!";
-        }
-    }
-    else
-    {
-        {
-            std::lock_guard<std::mutex> lock(g_saveMutex);
-            g_saveStatus = "ERROR: Could not save playlists database!";
-        }
-        std::cerr << "Failed to save playlists database\n";
-    }
-
-    g_savingPlaylists = false;
-}
-
-void save_playlists_database_async(const std::vector<Playlist>& playlists)
-{
-    if (g_savingPlaylists) return; // Already saving, skip
-
-    // Make a copy of the playlists to save (in case the original changes)
-    std::vector<Playlist> playlistsCopy = playlists;
-
-    std::thread saveThread([playlistsCopy]() {
-        save_playlists_worker(playlistsCopy);
-    });
-    saveThread.detach();
-}
-
-std::vector<Playlist> load_playlists_database()
-{
-    std::vector<Playlist> playlists;
-
-    std::ifstream file(PLAYLISTS_DB_FILENAME);
-    if (!file.is_open()) return playlists;
-
-    nlohmann::json j;
-    file >> j;
-
-    for (const auto& item : j)
-    {
-        Playlist pl;
-        pl.name = item.value("name", "");
-        if (item.contains("songIds"))
-            pl.songIds = item["songIds"].get<std::vector<int>>();
-        if (!pl.name.empty())
-            playlists.push_back(pl);
-    }
-
-    return playlists;
-}
-
-// Ensure "library" playlist exists and contains all song IDs
-void ensure_library_playlist()
-{
-    // Find library playlist
-    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
-        [](const Playlist& p) { return p.name == "library"; });
-
-    if (it == g_playlists.end())
-    {
-        // Create library playlist with all song IDs
-        Playlist library;
-        library.name = "library";
-        for (const auto& song : g_allSongs)
-            library.songIds.push_back(song.id);
-        g_playlists.push_back(library);
-    }
-    else
-    {
-        // Update library playlist to contain all song IDs
-        it->songIds.clear();
-        for (const auto& song : g_allSongs)
-            it->songIds.push_back(song.id);
-    }
-    save_playlists_database_async(g_playlists);
-}
-
-// Add a song to a playlist (avoid duplicates)
-bool add_song_to_playlist(const std::string& playlistName, int songId)
-{
-    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
-        [&](const Playlist& p) { return p.name == playlistName; });
-    if (it == g_playlists.end()) return false;
-
-    // Check for duplicate
-    if (std::find(it->songIds.begin(), it->songIds.end(), songId) != it->songIds.end())
-        return false; // Already in playlist
-
-    it->songIds.push_back(songId);
-    save_playlists_database_async(g_playlists);
-    return true;
-}
-
-// Remove a song from a playlist
-bool remove_song_from_playlist(const std::string& playlistName, int songId)
-{
-    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
-        [&](const Playlist& p) { return p.name == playlistName; });
-    if (it == g_playlists.end()) return false;
-
-    // Cannot remove from library playlist? (optional - library should always have all songs)
-    if (playlistName == "library") return false;
-
-    // Find and remove the song ID from the playlist
-    auto songIt = std::find(it->songIds.begin(), it->songIds.end(), songId);
-    if (songIt == it->songIds.end()) return false; // Song not in playlist
-
-    it->songIds.erase(songIt);
-    save_playlists_database_async(g_playlists);
-    return true;
-}
-
-// Create a new playlist
-bool create_playlist(const std::string& name)
-{
-    // Check if name already exists
-    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
-        [&](const Playlist& p) { return p.name == name; });
-    if (it != g_playlists.end()) return false;
-
-    Playlist newPlaylist;
-    newPlaylist.name = name;
-    g_playlists.push_back(newPlaylist);
-    save_playlists_database_async(g_playlists);
-    return true;
-}
-
-// Delete a playlist (cannot delete "library")
-bool delete_playlist(const std::string& name)
-{
-    if (name == "library") return false;
-
-    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
-        [&](const Playlist& p) { return p.name == name; });
-    if (it == g_playlists.end()) return false;
-
-    g_playlists.erase(it);
-    save_playlists_database_async(g_playlists);
-    return true;
-}
-
-// Get songs for a playlist (returns vector of full SongInfo)
-std::vector<SongInfo> get_playlist_songs(const Playlist& playlist)
-{
-    std::vector<SongInfo> songs;
-    std::lock_guard<std::mutex> lock(g_songMutex);
-    for (int id : playlist.songIds)
-    {
-        auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-            [id](const SongInfo& s) { return s.id == id; });
-        if (it != g_allSongs.end())
-            songs.push_back(*it);
-    }
-    return songs;
-}
-
-// Get the next song in the current playlist
-int get_next_song_in_playlist(int currentSongId)
-{
-    if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
-        return -1;
-
-    const auto& playlist = g_playlists[g_currentPlaylistIndex];
-    auto it = std::find(playlist.songIds.begin(), playlist.songIds.end(), currentSongId);
-    if (it == playlist.songIds.end() || it + 1 == playlist.songIds.end())
-        return -1;
-
-    return *(it + 1);
-}
-
-// ------------------------------------------------------------
-// Folder Scanning (Worker Thread)
-// ------------------------------------------------------------
-
-void scan_folder_worker(const std::string& folderPath)
-{
-    g_scanStatus = "Scanning folder: " + folderPath;
-
-    std::vector<SongInfo> newSongs;
-
-    try
-    {
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(folderPath))
-        {
-            if (!g_scanning) break; // Allow cancellation
-
-            if (entry.is_regular_file())
-            {
-                std::string ext = entry.path().extension().string();
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-                if (ext == ".mp3")
-                {
-                    SongInfo song;
-                    song.path = entry.path().string();
-                    // sanitize
-                    song.title = sanitize_utf8(song.title);
-                    song.artist = sanitize_utf8(song.artist);
-                    extract_metadata(song.path, song.title, song.artist);
-                    newSongs.push_back(song);
-
-                    g_scanStatus = "Found: " + song.title;
-                }
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        g_scanStatus = "Error: " + std::string(e.what());
-    }
-
-    if (g_scanning)
-    {
-        // Assign new IDs and merge with existing songs (avoid duplicates by path)
-        std::lock_guard<std::mutex> lock(g_songMutex);
-        int maxId = 0;
-        for (const auto& song : g_allSongs)
-            if (song.id > maxId) maxId = song.id;
-
-        for (auto& song : newSongs)
-        {
-            // Check if song already exists by path
-            auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-                [&](const SongInfo& s) { return s.path == song.path; });
-            if (it == g_allSongs.end())
-            {
-                song.id = ++maxId;
-                g_allSongs.push_back(song);
-            }
-        }
-
-        // Save songs database
-        save_songs_database_async(g_allSongs);
-
-        // Update library playlist
-        ensure_library_playlist();
-
-        g_scanStatus = "Scan complete! Found " + std::to_string(newSongs.size()) + " new songs";
-    }
-    else
-    {
-        g_scanStatus = "Scan cancelled";
-    }
-
-    g_scanning = false;
-}
-
-void start_folder_scan(const std::string& folderPath)
-{
-    if (g_scanning) return;
-
-    g_scanning = true;
-    std::thread scanThread(scan_folder_worker, folderPath);
-    scanThread.detach();
-}
-
-// ------------------------------------------------------------
-// Load MP3 with thread safety
-// ------------------------------------------------------------
-
-// Clear least recently used from cache (simple FIFO for now)
-// WARNING: This function assumes g_cacheMutex is already locked!
-void manage_cache_size()
-{
-    // Do NOT lock here - mutex should already be locked by caller
-    if (g_audioCache.size() > MAX_CACHE_SIZE)
-    {
-        // Find least recently used (LRU)
-        auto lru = g_audioCache.begin();
-        for (auto it = g_audioCache.begin(); it != g_audioCache.end(); ++it)
-        {
-            if (it->second.lastUsed < lru->second.lastUsed)
-                lru = it;
-        }
-
-        std::cout << "Cache size exceeded, removing LRU song ID: " << lru->first << "\n";
-        g_audioCache.erase(lru);
-    }
-}
-
-// load mp3 from disk into cache
-bool load_mp3(int songId, const std::string& path)
-{
-    std::cout << "load_mp3: Starting for song " << songId << std::endl;
-
-    // Check if already in cache
-    {
-        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
-        auto it = g_audioCache.find(songId);
-        if (it != g_audioCache.end() && it->second.isValid)
-        {
-            std::cout << "Song " << songId << " already in cache\n";
-            return true;
-        }
-    }
-
-    std::cout << "Loading song " << songId << " from disk: " << path << "\n";
-    std::cout << "Opening MP3 file..." << std::endl;
-
-    mp3dec_ex_t dec;
-    int result = mp3dec_ex_open(&dec, path.c_str(), MP3D_SEEK_TO_SAMPLE);
-    if (result)
-    {
-        std::cerr << "Failed to open MP3: " << path << " error code: " << result << "\n";
-        return false;
-    }
-
-    std::cout << "MP3 opened successfully. Channels: " << dec.info.channels
-              << ", Sample rate: " << dec.info.hz
-              << ", Samples: " << dec.samples << std::endl;
-
-    CachedAudio cached;
-    cached.channels = dec.info.channels;
-    cached.sampleRate = dec.info.hz;
-    cached.totalFrames = dec.samples / cached.channels;
-    cached.pcm.resize(dec.samples);
-    cached.isValid = true;
-    cached.lastUsed = std::chrono::steady_clock::now();
-
-    std::cout << "Reading PCM data (" << dec.samples << " samples)..." << std::endl;
-    size_t read = mp3dec_ex_read(&dec, cached.pcm.data(), dec.samples);
-    std::cout << "Read " << read << " samples" << std::endl;
-
-    mp3dec_ex_close(&dec);
-
-    if (read == 0)
-    {
-        std::cerr << "Failed to decode MP3: " << path << "\n";
-        return false;
-    }
-
-    std::cout << "Storing in cache..." << std::endl;
-    // Store in cache
-    {
-        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
-        g_audioCache[songId] = std::move(cached);
-        manage_cache_size();
-    }
-
-    std::cout << "Successfully loaded and cached song " << songId << "\n";
-    return true;
-}
-
-// Play a song by ID - moves from cache to avoid copying PCM data
-bool play_song_by_id(int songId)
-{
-    std::cout << "play_song_by_id: Starting for song ID " << songId << std::endl;
-
-    // Quick validation
-    if (songId < 0) {
-        std::cerr << "Invalid song ID: " << songId << std::endl;
-        return false;
-    }
-
-
-    // Find the song info
-    SongInfo songInfo;
-    {
-        std::lock_guard<std::mutex> lock(g_songMutex);
-        auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-            [songId](const SongInfo& s) { return s.id == songId; });
-        if (it == g_allSongs.end())
-        {
-            std::cerr << "Song ID " << songId << " not found in database\n";
-            return false;
-        }
-        songInfo = *it; // Copy the needed info
-    }
-
-    std::cout << "Found song: " << songInfo.title << " at path: " << songInfo.path << std::endl;
-
-    // Check if song is cached, if not, load it
-    bool needsLoad = false;
-    {
-        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
-        auto cacheIt = g_audioCache.find(songId);
-        if (cacheIt == g_audioCache.end() || !cacheIt->second.isValid)
-        {
-            needsLoad = true;
-        }
-    }
-
-    if (needsLoad)
-    {
-        std::cout << "Song " << songId << " not cached, loading first...\n";
-        if (!load_mp3(songId, songInfo.path))
-        {
-            std::cerr << "Failed to load song " << songId << "\n";
-            return false;
-        }
-    }
-
-    // Move from cache to global audio state
-    // IMPORTANT: Lock in consistent order (cache first, then audio)
-    {
-        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
-        std::lock_guard<std::mutex> audioLock(gAudio.mutex);
-
-        auto cacheIt = g_audioCache.find(songId);
-        if (cacheIt == g_audioCache.end() || !cacheIt->second.isValid)
-        {
-            std::cerr << "Song " << songId << " not found in cache after loading\n";
-            return false;
-        }
-
-        // Validate PCM data
-        if (cacheIt->second.pcm.empty()) {
-            std::cerr << "Empty PCM data for song " << songId << std::endl;
-            return false;
-        }
-
-        // update last used time stamp
-        cacheIt->second.lastUsed = std::chrono::steady_clock::now();
-
-        // Move PCM data from cache to audio state
-        gAudio.pcm.swap(cacheIt->second.pcm);
-        gAudio.channels = cacheIt->second.channels;
-        gAudio.sampleRate = cacheIt->second.sampleRate;
-        gAudio.totalFrames = cacheIt->second.totalFrames;
-        gAudio.currentFrame = 0;
-        gAudio.playing = true;
-
-        std::cout << "Audio state updated. Channels: " << gAudio.channels
-                  << ", Sample rate: " << gAudio.sampleRate
-                  << ", Total frames: " << gAudio.totalFrames << std::endl;
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(g_nowPlayingMutex);
-        g_nowPlaying = songInfo;
-    }
-
-    std::cout << "Now playing song ID " << songId << ": " << songInfo.title << "\n";
-    return true;
-}
-
-// Preload the next song in background
-void preload_next_song_background()
-{
-    if (g_preloadingNext) return;
-
-    // Safety check - make sure we have a valid playlist
-    if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
-        return;
-
-    const auto& playlist = g_playlists[g_currentPlaylistIndex];
-
-    // Check if playlist is empty
-    if (playlist.songIds.empty())
-        return;
-
-    int nextId = get_next_song_in_playlist(g_nowPlaying.id);
-
-    // If at end of playlist, loop to first song
-    if (nextId == -1 && !playlist.songIds.empty())
-    {
-        nextId = playlist.songIds[0];
-    }
-
-    if (nextId != -1 && nextId != g_nowPlaying.id)  // Don't preload the same song
-    {
-        std::string songPath;
-        {
-            std::lock_guard<std::mutex> lock(g_songMutex);
-            auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-                [nextId](const SongInfo& s) { return s.id == nextId; });
-            if (it != g_allSongs.end())
-            {
-                songPath = it->path;
-            }
-        }
-
-        if (!songPath.empty())
-        {
-            g_preloadingNext = true;
-            std::thread preloadThread([nextId, path = std::move(songPath)]() {
-                load_mp3(nextId, path);
-                g_preloadingNext = false;
-            });
-            preloadThread.detach();
-        }
-    }
-}
-
-// ------------------------------------------------------------
-// Audio Callback (thread-safe)
-// ------------------------------------------------------------
-
-void audio_callback(void* userdata, Uint8* stream, int len)
-{
-    AudioState* audio = (AudioState*)userdata;
-
-    SDL_memset(stream, 0, len);
-
-    if (!audio->playing)
-        return;
-
-    std::lock_guard<std::mutex> lock(audio->mutex);
-
-    float* out = (float*)stream;
-    int floatCount = len / sizeof(float);
-
-    size_t currentSample = audio->currentFrame * audio->channels;
-    size_t totalSamples = audio->totalFrames * audio->channels;
-
-    for (int i = 0; i < floatCount; ++i)
-    {
-        if (currentSample >= totalSamples)
-        {
-            if (audio->playing)  // Only trigger once when song ends
-            {
-                audio->playing = false;
-                g_requestNextSong = true;  // Signal main thread to play next song
-
-                // Set flag for main thread to increment play count
-                g_incrementPlayCount = true;
-                {
-                    std::lock_guard<std::mutex> lock(g_nowPlayingMutex);
-                    g_songToIncrement = g_nowPlaying.id;
-                }
-            }
-            break;
-        }
-
-        out[i] = audio->pcm[currentSample++];
-    }
-
-    audio->currentFrame = currentSample / audio->channels;
-}
-
-// ------------------------------------------------------------
-// Dear ImGui Helpers
-// ------------------------------------------------------------
-
-void SetInvertedBlackAndWhiteTheme()
-{
-    ImGuiStyle& style = ImGui::GetStyle();
-    ImVec4* colors = style.Colors;
-
-    // White background, black text (like paper)
-    colors[ImGuiCol_Text] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-    colors[ImGuiCol_TextDisabled] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_WindowBg] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_ChildBg] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_PopupBg] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_Border] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-}
-
-void SetBlackAndWhiteTheme()
-{
-    ImGuiStyle& style = ImGui::GetStyle();
-    ImVec4* colors = style.Colors;
-
-    // Base colors
-    colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_TextDisabled] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_WindowBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_ChildBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_Border] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_BorderShadow] = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.25f, 0.25f, 0.25f, 1.00f);
-    colors[ImGuiCol_TitleBgCollapsed] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_MenuBarBg] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrab] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.25f, 0.25f, 0.25f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.45f, 0.45f, 0.45f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.65f, 0.65f, 0.65f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-    colors[ImGuiCol_Separator] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_SeparatorHovered] = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);
-    colors[ImGuiCol_SeparatorActive] = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_ResizeGrip] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_ResizeGripActive] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_Tab] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_TabHovered] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_TabActive] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_TabUnfocused] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.25f, 0.25f, 0.25f, 1.00f);
-    colors[ImGuiCol_PlotLines] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_PlotLinesHovered] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_PlotHistogram] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_PlotHistogramHovered] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_TableHeaderBg] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_TableBorderStrong] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_TableBorderLight] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_TableRowBg] = ImVec4(0.10f, 0.10f, 0.10f, 1.00f);
-    colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.15f, 0.15f, 0.15f, 1.00f);
-    colors[ImGuiCol_TextSelectedBg] = ImVec4(0.50f, 0.50f, 0.50f, 0.35f);
-    colors[ImGuiCol_DragDropTarget] = ImVec4(0.70f, 0.70f, 0.70f, 0.90f);
-    colors[ImGuiCol_NavHighlight] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_NavWindowingHighlight] = ImVec4(0.70f, 0.70f, 0.70f, 0.70f);
-    colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.10f, 0.10f, 0.10f, 0.50f);
-    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.10f, 0.10f, 0.10f, 0.50f);
-
-    // Style settings
-    style.WindowRounding = 0.0f;
-    style.FrameRounding = 0.0f;
-    style.GrabRounding = 0.0f;
-    style.TabRounding = 0.0f;
-    style.ScrollbarRounding = 0.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.PopupBorderSize = 1.0f;
-}
-
-void SetHighContrastBlackAndWhiteTheme()
-{
-    ImGuiStyle& style = ImGui::GetStyle();
-    ImVec4* colors = style.Colors;
-
-    // Pure black and white theme
-    colors[ImGuiCol_Text] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_WindowBg] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-    colors[ImGuiCol_Border] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_FrameBg] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_FrameBgActive] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_TitleBg] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-    colors[ImGuiCol_TitleBgActive] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_Button] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
-    colors[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.30f, 0.30f, 1.00f);
-    colors[ImGuiCol_ButtonActive] = ImVec4(0.50f, 0.50f, 0.50f, 1.00f);
-    colors[ImGuiCol_Header] = ImVec4(0.20f, 0.20f, 0.20f, 1.00f);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(0.40f, 0.40f, 0.40f, 1.00f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(0.60f, 0.60f, 0.60f, 1.00f);
-    colors[ImGuiCol_SliderGrab] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-    colors[ImGuiCol_SliderGrabActive] = ImVec4(0.80f, 0.80f, 0.80f, 1.00f);
-    colors[ImGuiCol_CheckMark] = ImVec4(1.00f, 1.00f, 1.00f, 1.00f);
-
-    // Sharp corners for minimalist look
-    style.WindowRounding = 0.0f;
-    style.FrameRounding = 0.0f;
-    style.GrabRounding = 0.0f;
-    style.PopupRounding = 0.0f;
-    style.ScrollbarRounding = 0.0f;
-    style.TabRounding = 0.0f;
-
-    // Increase contrast with thicker borders
-    style.WindowBorderSize = 2.0f;
-    style.FrameBorderSize = 1.0f;
-    style.PopupBorderSize = 2.0f;
-}
+#include "definitions.h"
+#include "globals.h"
+#include "helpers.h"
+#include "mp3.h"
+#include "database.h"
+#include "folder.h"
+#include "audio.h"
+#include "helperImgui.h"
 
 // ------------------------------------------------------------
 // Main
@@ -1180,7 +94,7 @@ int main(int argc, char** argv)
     spec.channels = 2;
     spec.samples = 4096;
     spec.callback = audio_callback;
-    spec.userdata = &gAudio;
+    spec.userdata = &gPlayback;
 
     if (SDL_OpenAudio(&spec, &obtained) < 0)
     {
@@ -1239,13 +153,11 @@ int main(int argc, char** argv)
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        if(gAudio.playing){
+        // preload next song to cache
+        if(gAudio.playing && !g_hasPreloadedForCurrentSong){
             preload_next_song_background();
+            g_hasPreloadedForCurrentSong = true;
         }
-
-        // ----------------------------------------------------
-        // Auto-play next song when current finishes
-        // ----------------------------------------------------
 
         // ----------------------------------------------------
         // Auto-play next song when current finishes
@@ -1253,36 +165,19 @@ int main(int argc, char** argv)
 
         if (g_requestNextSong)
         {
-            g_requestNextSong = false;  // Reset flag
+            g_requestNextSong = false;
+            g_hasPreloadedForCurrentSong = false;
 
-            // Safety checks
-            if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
-                continue;  // Skip if no valid playlist
-
-            const auto& currentPlaylist = g_playlists[g_currentPlaylistIndex];
-
-            // Check if playlist is empty
-            if (currentPlaylist.songIds.empty())
-                continue;
-
-            int nextId = get_next_song_in_playlist(g_nowPlaying.id);
-
-            if (nextId != -1)
+            if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
             {
-                // Play the next song
-                if (!play_song_by_id(nextId))
+                const auto& currentPlaylist = g_playlists[g_currentPlaylistIndex];
+                if (!currentPlaylist.songIds.empty())
                 {
-                    std::cerr << "Failed to play next song ID: " << nextId << std::endl;
-                }
-            }
-            else
-            {
-                // End of playlist - loop back to first song
-                int firstSongId = currentPlaylist.songIds[0];
-                std::cout << "End of playlist, looping to first song: " << firstSongId << std::endl;
-                if (!play_song_by_id(firstSongId))
-                {
-                    std::cerr << "Failed to loop to first song ID: " << firstSongId << std::endl;
+                    int currentId = getCurrentPlayingId();
+                    if (currentId != -1) {
+                        int nextId = get_next_song_in_playlist(currentId);
+                        if (nextId != -1) play_song_by_id(nextId);
+                    }
                 }
             }
         }
@@ -1308,27 +203,54 @@ int main(int argc, char** argv)
 
         ImGui::Begin("player", nullptr, playerFlags);
 
-        if(!g_nowPlaying.path.empty()){
-            ImGui::TextColored(ImVec4(0,1,0,1), "now playing: %s by %s", g_nowPlaying.title.c_str(), g_nowPlaying.artist.c_str());
+        // now playing display
+        SongInfo currentSong = getCurrentPlayingMetadata();
+        if(!currentSong.path.empty()){
+            ImGui::TextColored(ImVec4(0,1,0,1), "now playing: %s by %s",
+                               currentSong.title.c_str(),
+                               currentSong.artist.c_str());
         }
         ImGui::Separator();
 
-        if (ImGui::Button("play/pause"))
+        if (ImGui::Button("<"))
         {
-            gAudio.playing = !gAudio.playing;
+            if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
+            {
+                const auto& currentPlaylist = g_playlists[g_currentPlaylistIndex];
+                if (!currentPlaylist.songIds.empty())
+                {
+                    int currentId = getCurrentPlayingId();
+                    if (currentId != -1) {
+                        int prevId = get_prev_song_in_playlist(currentId);
+                        if (prevId != -1) play_song_by_id(prevId);
+                    }
+                }
+            }
         }
 
         ImGui::SameLine();
 
-        if (ImGui::Button("stop"))
+        if (ImGui::Button("play/pause"))
         {
-            SDL_LockAudio();
+            gPlayback.playing = !gPlayback.playing;
+        }
+
+        ImGui::SameLine();
+
+        if (ImGui::Button(">"))
+        {
+            if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
             {
-                std::lock_guard<std::mutex> lock(gAudio.mutex);
-                gAudio.playing = false;
-                gAudio.currentFrame = 0;
+                const auto& currentPlaylist = g_playlists[g_currentPlaylistIndex];
+                if (!currentPlaylist.songIds.empty())
+                {
+                    int currentId = getCurrentPlayingId();
+                    if (currentId != -1) {
+                        int nextId = get_next_song_in_playlist(currentId);
+                        if (nextId != -1) play_song_by_id(nextId);
+                    }
+                }
             }
-            SDL_UnlockAudio();
         }
 
         ImGui::Separator();
@@ -1336,11 +258,11 @@ int main(int argc, char** argv)
         // Time Info
         float currentSeconds = 0.0f, totalSeconds = 0.0f;
         {
-            std::lock_guard<std::mutex> lock(gAudio.mutex);
-            if (gAudio.sampleRate > 0)
+            std::lock_guard<std::mutex> lock(gPlayback.mutex);
+            if (gPlayback.sampleRate > 0)
             {
-                currentSeconds = (float)gAudio.currentFrame / (float)gAudio.sampleRate;
-                totalSeconds = (float)gAudio.totalFrames / (float)gAudio.sampleRate;
+                currentSeconds = (float)gPlayback.currentFrame / (float)gPlayback.sampleRate;
+                totalSeconds = (float)gPlayback.totalFrames / (float)gPlayback.sampleRate;
             }
         }
 
@@ -1349,18 +271,18 @@ int main(int argc, char** argv)
         // Seek Bar
         float progress = 0.0f;
         {
-            std::lock_guard<std::mutex> lock(gAudio.mutex);
-            if (gAudio.totalFrames > 0)
-                progress = (float)gAudio.currentFrame / (float)gAudio.totalFrames;
+            std::lock_guard<std::mutex> lock(gPlayback.mutex);
+            if (gPlayback.totalFrames > 0)
+                progress = (float)gPlayback.currentFrame / (float)gPlayback.totalFrames;
         }
 
         if (ImGui::SliderFloat("seek", &progress, 0.0f, 1.0f))
         {
             SDL_LockAudio();
             {
-                std::lock_guard<std::mutex> lock(gAudio.mutex);
-                size_t newFrame = (size_t)(progress * gAudio.totalFrames);
-                gAudio.currentFrame = newFrame;
+                std::lock_guard<std::mutex> lock(gPlayback.mutex);
+                size_t newFrame = (size_t)(progress * gPlayback.totalFrames);
+                gPlayback.currentFrame = newFrame;
             }
             SDL_UnlockAudio();
         }
@@ -1368,10 +290,10 @@ int main(int argc, char** argv)
         // Audio Info
         ImGui::Separator();
         {
-            std::lock_guard<std::mutex> lock(gAudio.mutex);
-            ImGui::Text("Sample Rate: %d Hz", gAudio.sampleRate);
-            ImGui::Text("Channels: %d", gAudio.channels);
-            ImGui::Text("Total Frames: %zu", gAudio.totalFrames);
+            std::lock_guard<std::mutex> lock(gPlayback.mutex);
+            ImGui::Text("Sample Rate: %d Hz", gPlayback.sampleRate);
+            ImGui::Text("Channels: %d", gPlayback.channels);
+            ImGui::Text("Total Frames: %zu", gPlayback.totalFrames);
         }
 
         ImGui::End();
@@ -1496,20 +418,21 @@ int main(int argc, char** argv)
         ImGui::Begin(playlistTitle.c_str(), nullptr, playlistWindowFlags);
 
         // Toolbar
-        if (ImGui::Button("open folder"))
-        {
-            if (!g_scanning)
+        if(g_playlists[g_currentPlaylistIndex].name == "library"){
+            if (ImGui::Button("open folder"))
             {
-                const char* folder = tinyfd_selectFolderDialog("select music folder", "");
-                if (folder)
+                if (!g_scanning)
                 {
-                    start_folder_scan(folder);
+                    const char* folder = tinyfd_selectFolderDialog("select music folder", "");
+                    if (folder)
+                    {
+                        start_folder_scan(folder);
+                    }
                 }
             }
+
+            ImGui::SameLine();
         }
-
-        ImGui::SameLine();
-
         if (ImGui::Button("add songs") && g_playlists[g_currentPlaylistIndex].name != "library")
         {
             g_showAddFromLibraryPopup = true;
