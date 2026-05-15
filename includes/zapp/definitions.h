@@ -38,12 +38,13 @@ struct AudioPlayback
     float* pcm = nullptr;  // Pointer to PCM data (owned by cache)
     size_t pcmSize = 0;
     int channels = 0;
-    int sampleRate = 0;
+    int mp3SampleRate = 0;      // NEW: Sample rate from MP3 file
+    int outputSampleRate = 0;   // NEW: Actual SDL output sample rate
     std::atomic<size_t> currentFrame = 0;
     size_t totalFrames = 0;
     std::atomic<bool> playing = false;
     std::mutex mutex;
-    int currentSongId = -1;  // Track which song is playing
+    int currentSongId = -1;
 };
 
 // Audio cache structure

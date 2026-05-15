@@ -31,30 +31,39 @@ inline void audio_callback(void* userdata, Uint8* stream, int len)
 
     float* out = (float*)stream;
     int floatCount = len / sizeof(float);
+    int samplesPerFrame = audio->channels;
 
-    size_t currentSample = audio->currentFrame * audio->channels;
-    size_t totalSamples = audio->totalFrames * audio->channels;
+    size_t currentSample = audio->currentFrame * samplesPerFrame;
+    size_t totalSamples = audio->totalFrames * samplesPerFrame;
 
-    for (int i = 0; i < floatCount; ++i)
+    for (int i = 0; i < floatCount; i += samplesPerFrame)
     {
         if (currentSample >= totalSamples)
         {
-            if (audio->playing)  // Only trigger once when song ends
+            if (audio->playing)
             {
                 audio->playing = false;
-                g_requestNextSong = true;  // Signal main thread to play next song
-
-                // Set flag for main thread to increment play count
+                g_requestNextSong = true;
                 g_incrementPlayCount = true;
-                g_songToIncrement = getCurrentPlayingId();  // Use atomic getter
+                g_songToIncrement = audio->currentSongId;
             }
             break;
         }
 
-        out[i] = audio->pcm[currentSample++];
+        // Copy the samples
+        for (int c = 0; c < samplesPerFrame; c++)
+        {
+            if (currentSample + c < totalSamples)
+                out[i + c] = audio->pcm[currentSample + c];
+            else
+                out[i + c] = 0.0f;
+        }
+
+        currentSample += samplesPerFrame;
     }
 
-    audio->currentFrame = currentSample / audio->channels;
+    // Update current frame based on samples consumed
+    audio->currentFrame = currentSample / samplesPerFrame;
 }
 
 #endif

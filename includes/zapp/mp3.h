@@ -14,6 +14,7 @@
 #include "definitions.h"
 #include "globals.h"
 #include "helpers.h"
+#include "helperSdl.h"
 #include "database.h"
 
 // ------------------------------------------------------------
@@ -98,7 +99,7 @@ inline void extract_metadata(const std::string& path, std::string& title, std::s
 inline void manage_cache_size()
 {
     // Do NOT lock here - mutex should already be locked by caller
-    if (g_audioCache.size() > MAX_CACHE_SIZE)
+    if (g_audioCache.size() > g_cacheSizeSetting)
     {
         // Find least recently used (LRU)
         auto lru = g_audioCache.begin();
@@ -235,6 +236,43 @@ inline bool play_song_by_id(int songId)
         }
     }
 
+    // Get the cached audio info BEFORE locking for playback
+    int mp3SampleRate = 0;
+    int mp3Channels = 0;
+    size_t mp3TotalFrames = 0;
+
+    {
+        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
+        auto cacheIt = g_audioCache.find(songId);
+        if (cacheIt == g_audioCache.end() || !cacheIt->second.isValid)
+        {
+            std::cerr << "Song " << songId << " not found in cache after loading\n";
+            return false;
+        }
+        mp3SampleRate = cacheIt->second.sampleRate;
+        mp3Channels = cacheIt->second.channels;
+        mp3TotalFrames = cacheIt->second.totalFrames;
+    }
+
+    // Reconfigure audio if needed (sample rate or channels differ)
+    if (!g_audioInitialized ||
+        g_currentAudioSpec.freq != mp3SampleRate ||
+        g_currentAudioSpec.channels != mp3Channels)
+    {
+        std::cout << "Reconfiguring audio from " << g_currentAudioSpec.freq
+                  << "Hz/" << g_currentAudioSpec.channels << "ch to "
+                  << mp3SampleRate << "Hz/" << mp3Channels << "ch" << std::endl;
+
+        if (!ReconfigureAudio(mp3SampleRate, mp3Channels))
+        {
+            std::cerr << "Failed to reconfigure audio for sample rate "
+                      << mp3SampleRate << std::endl;
+            // Try to fall back to original config
+            ReconfigureAudio(44100, 2);
+            return false;
+        }
+    }
+
     // Move from cache to global audio state
     {
         std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
@@ -253,33 +291,33 @@ inline bool play_song_by_id(int songId)
             return false;
         }
 
-        // update last used time stamp
-        cacheIt->second.lastUsed = std::chrono::steady_clock::now();
-
-        // point to pcm data
+        // Point to cached data
         gPlayback.pcm = cacheIt->second.pcm.data();
         gPlayback.pcmSize = cacheIt->second.pcm.size();
         gPlayback.channels = cacheIt->second.channels;
-        gPlayback.sampleRate = cacheIt->second.sampleRate;
+        gPlayback.mp3SampleRate = cacheIt->second.sampleRate;
+        gPlayback.outputSampleRate = g_currentAudioSpec.freq;  // Use actual output rate
         gPlayback.totalFrames = cacheIt->second.totalFrames;
         gPlayback.currentFrame = 0;
         gPlayback.playing = true;
         gPlayback.currentSongId = songId;
 
+        // Update last used time
         cacheIt->second.lastUsed = std::chrono::steady_clock::now();
 
-        std::cout << "Audio state updated. Channels: " << gPlayback.channels
-                  << ", Sample rate: " << gPlayback.sampleRate
+        std::cout << "Audio playback set up. MP3 rate: " << gPlayback.mp3SampleRate
+                  << " Hz, Output rate: " << gPlayback.outputSampleRate
+                  << " Hz, Channels: " << gPlayback.channels
                   << ", Total frames: " << gPlayback.totalFrames << std::endl;
     }
 
-    // Update current playing song using the new thread-safe function
+    // Update current playing song
     setCurrentPlaying(songInfo);
 
     // Reset preload flag for the new song
     g_hasPreloadedForCurrentSong = false;
 
-    std::cout << "Now playing song ID " << songId << ": " << songInfo.title << "\n";
+    std::cout << "Now playing song ID " << songId << ": " << songInfo.title << std::endl;
     return true;
 }
 

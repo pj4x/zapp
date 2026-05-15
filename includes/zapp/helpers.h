@@ -1,6 +1,7 @@
 #ifndef ZAPP_HELPERS_H
 #define ZAPP_HELPERS_H
 
+#include <SDL.h>
 #include <string.h>
 #include <atomic>
 #include <vector>
@@ -8,8 +9,10 @@
 #include <unordered_map>
 #include <filesystem>
 #include <fstream>
+#include "imgui.h"
 #include "definitions.h"
 #include "globals.h"
+#include "audio.h"
 
 inline int getCurrentPlayingId() {
     return g_currentPlayingId.load();

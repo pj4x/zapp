@@ -1,2 +1,1 @@
-- change theme menu
-- change buffer size menu
+- save settings

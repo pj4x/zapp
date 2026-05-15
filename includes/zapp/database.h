@@ -14,6 +14,7 @@
 #include "definitions.h"
 #include "globals.h"
 #include "helpers.h"
+#include "helperImgui.h"
 
 // ------------------------------------------------------------
 // JSON Database Functions (Songs)
@@ -376,6 +377,84 @@ inline int get_prev_song_in_playlist(int currentSongId)
         return playlist.songIds.back();
 
     return *(it - 1);
+}
+
+
+// save/load settings
+
+inline const std::string SETTINGS_FILENAME = "settings.json";
+
+void save_settings()
+{
+    nlohmann::json j;
+
+    // Save basic settings
+    j["cacheSize"] = g_cacheSizeSetting;
+    j["theme"] = g_currentTheme;
+
+    // Save highlight color (RGBA)
+    j["highlightColor"]["r"] = g_highlightColor.x;
+    j["highlightColor"]["g"] = g_highlightColor.y;
+    j["highlightColor"]["b"] = g_highlightColor.z;
+    j["highlightColor"]["a"] = g_highlightColor.w;
+
+    // Write to file
+    std::ofstream file(SETTINGS_FILENAME);
+    if (file.is_open())
+    {
+        file << j.dump(4);  // Pretty print with 4 spaces
+        std::cout << "Settings saved to " << SETTINGS_FILENAME << std::endl;
+    }
+    else
+    {
+        std::cerr << "Failed to save settings to " << SETTINGS_FILENAME << std::endl;
+    }
+}
+
+void load_settings()
+{
+    std::ifstream file(SETTINGS_FILENAME);
+    if (!file.is_open())
+    {
+        std::cout << "No settings file found, using defaults" << std::endl;
+        return;
+    }
+
+    nlohmann::json j;
+    try
+    {
+        file >> j;
+
+        // Load basic settings
+        g_cacheSizeSetting = j.value("cacheSize", 5);
+        g_currentTheme = j.value("theme", 0);
+
+        // Load highlight color
+        if (j.contains("highlightColor"))
+        {
+            g_highlightColor.x = j["highlightColor"].value("r", 0.0f);
+            g_highlightColor.y = j["highlightColor"].value("g", 1.0f);
+            g_highlightColor.z = j["highlightColor"].value("b", 0.0f);
+            g_highlightColor.w = j["highlightColor"].value("a", 1.0f);
+        }
+
+        // Clamp values to valid ranges
+        if (g_cacheSizeSetting < 1) g_cacheSizeSetting = 1;
+        if (g_cacheSizeSetting > 20) g_cacheSizeSetting = 20;
+        if (g_currentTheme < 0) g_currentTheme = 0;
+        if (g_currentTheme > 2) g_currentTheme = 2;
+
+        // Apply loaded theme
+        ApplyTheme(g_currentTheme);
+
+        std::cout << "Settings loaded: Cache=" << g_cacheSizeSetting
+                  << ", Theme=" << g_themeNames[g_currentTheme]
+                  << std::endl;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "Error loading settings: " << e.what() << std::endl;
+    }
 }
 
 #endif
