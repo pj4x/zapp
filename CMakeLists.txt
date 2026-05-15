@@ -15,6 +15,8 @@ add_executable(zapp
 
      imgui/backends/imgui_impl_sdl2.cpp
      imgui/backends/imgui_impl_sdlrenderer2.cpp
+
+     tinyfiledialogs/tinyfiledialogs.c
  )
 
 target_include_directories(zapp PRIVATE
@@ -22,6 +24,8 @@ target_include_directories(zapp PRIVATE
      imgui/backends
      SDL2_INCLUDE_DIRS
      minimp3
+     json
+     tinyfiledialogs
  )
 
 target_link_libraries(zapp PRIVATE SDL2::SDL2)
