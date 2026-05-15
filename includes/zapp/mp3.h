@@ -318,6 +318,7 @@ inline bool play_song_by_id(int songId)
     g_hasPreloadedForCurrentSong = false;
 
     std::cout << "Now playing song ID " << songId << ": " << songInfo.title << std::endl;
+    g_hasPreloadedForCurrentSong = false;
     return true;
 }
 
@@ -359,6 +360,7 @@ inline void preload_next_song_background()
         {
             g_preloadingNext = true;
             std::thread preloadThread([nextId, path = std::move(songPath)]() {
+
                 load_mp3(nextId, path);
                 g_preloadingNext = false;
             });

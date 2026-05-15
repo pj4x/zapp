@@ -686,7 +686,7 @@ int main(int argc, char** argv)
 
                 if (ImGui::Button("remove from playlist"))
                 {
-                    remove_song_from_playlist(g_playlists[g_currentPlaylistIndex].name, g_selectedSongForOptions.id);
+                    remove_song_from_playlist(g_playlists[g_viewPlaylistIndex].name, g_selectedSongForOptions.id);
                     ImGui::CloseCurrentPopup();
                 }
 
@@ -805,7 +805,7 @@ int main(int argc, char** argv)
                 ImGui::Text("about");
                 ImGui::Indent();
                 ImGui::Text("zapp music player");
-                ImGui::Text("ver idfk");
+                ImGui::Text("ver 1.0");
                 ImGui::Unindent();
 
                 ImGui::Spacing();
