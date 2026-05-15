@@ -129,13 +129,16 @@ int main(int argc, char** argv)
     // Playlist deletion popup
     static bool showDeletePlaylistPopup = false;
 
+    // Add before the main loop
+    int g_cachedViewPlaylistIndex = -1;
+    std::vector<SongInfo> g_cachedPlaylistSongs;
+
     // --------------------------------------------------------
     // Main Loop
     // --------------------------------------------------------
 
-    bool g_needsRender = true;
     Uint32 lastRenderTime = 0;
-    const Uint32 MIN_RENDER_INTERVAL = 16; // ~60 FPS max
+    const Uint32 TARGET_FRAME_TIME = 16; // ~60 FPS max
 
     while (running)
     {
@@ -147,27 +150,10 @@ int main(int argc, char** argv)
         {
             hasEvents = true;
             ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT)
-            {
-                running = false;
-            }
+            if (event.type == SDL_QUIT) running = false;
         }
-
-        // ----------------------------------------------------
-        // ImGui Frame
-        // ----------------------------------------------------
-
-        // Only process ImGui and render if there are events OR periodic update needed
-        if (hasEvents || g_needsRender || (SDL_GetTicks() - lastRenderTime >= MIN_RENDER_INTERVAL))
-        {
-            ImGuiIO& io = ImGui::GetIO();
-            Uint32 currentTime = SDL_GetTicks();
-            io.DeltaTime = (currentTime - lastRenderTime) / 1000.0f;
-            lastRenderTime = currentTime;
-
-            ImGui_ImplSDLRenderer2_NewFrame();
-            ImGui_ImplSDL2_NewFrame();
-            ImGui::NewFrame();
+        Uint32 windowFlags = SDL_GetWindowFlags(window);
+        bool g_minimized = (windowFlags & SDL_WINDOW_MINIMIZED) != 0;
 
             // preload next song to cache
             if(gPlayback.playing && !g_hasPreloadedForCurrentSong){
@@ -205,6 +191,23 @@ int main(int argc, char** argv)
                 increment_play_count(g_songToIncrement);
                 g_songToIncrement = -1;
             }
+
+            if (g_minimized){
+                SDL_Delay(TARGET_FRAME_TIME*5);
+                continue;
+            }
+
+            // ----------------------------------------------------
+            // ImGui Frame
+            // ----------------------------------------------------
+            ImGuiIO& io = ImGui::GetIO();
+            Uint32 currentTime = SDL_GetTicks();
+            io.DeltaTime = (currentTime - lastRenderTime) / 1000.0f;
+            lastRenderTime = currentTime;
+
+            ImGui_ImplSDLRenderer2_NewFrame();
+            ImGui_ImplSDL2_NewFrame();
+            ImGui::NewFrame();
 
             // ----------------------------------------------------
             // Player Window (Top Left)
@@ -498,24 +501,28 @@ int main(int argc, char** argv)
 
             if (g_viewPlaylistIndex >= 0 && g_viewPlaylistIndex < (int)g_playlists.size())
             {
-                std::vector<SongInfo> playlistSongs = get_playlist_songs(g_playlists[g_viewPlaylistIndex]);
+                if (g_viewPlaylistIndex != g_cachedViewPlaylistIndex)
+                {
+                    g_cachedPlaylistSongs = get_playlist_songs(g_playlists[g_viewPlaylistIndex]);
+                    g_cachedViewPlaylistIndex = g_viewPlaylistIndex;
+                }
+                const std::vector<SongInfo>& playlistSongs = g_cachedPlaylistSongs;
+
+                std::string filterLower = playlistFilter;
+                std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
 
                 for (const auto& song : playlistSongs)
                 {
-                    // Apply filter
-                    std::string filterLower = playlistFilter;
-                    std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
-
-                    std::string titleLower = song.title;
-                    std::string artistLower = song.artist;
-                    std::transform(titleLower.begin(), titleLower.end(), titleLower.begin(), ::tolower);
-                    std::transform(artistLower.begin(), artistLower.end(), artistLower.begin(), ::tolower);
-
-                    if (!filterLower.empty() &&
-                        titleLower.find(filterLower) == std::string::npos &&
-                        artistLower.find(filterLower) == std::string::npos)
+                    if (!filterLower.empty())
                     {
-                        continue;
+                        std::string titleLower = song.title;
+                        std::string artistLower = song.artist;
+                        std::transform(titleLower.begin(), titleLower.end(), titleLower.begin(), ::tolower);
+                        std::transform(artistLower.begin(), artistLower.end(), artistLower.begin(), ::tolower);
+
+                        if (titleLower.find(filterLower) == std::string::npos &&
+                            artistLower.find(filterLower) == std::string::npos)
+                            continue;
                     }
 
                     /// Push ID
@@ -834,24 +841,19 @@ int main(int argc, char** argv)
             // ----------------------------------------------------
             // Render
             // ----------------------------------------------------
-
             ImGui::Render();
             SDL_SetRenderDrawColor(renderer, 20, 20, 20, 255);
             SDL_RenderClear(renderer);
             ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
             SDL_RenderPresent(renderer);
 
-            g_needsRender = false;
-        }else{
-            // No events, nothing to update - sleep longer
-            SDL_Delay(10);
-        }
+            // Frame rate limiting
+            Uint32 frameTime = SDL_GetTicks() - frameStart;
+            if (frameTime < TARGET_FRAME_TIME)
+            {
+                SDL_Delay(TARGET_FRAME_TIME - frameTime);
+            }
 
-        // Frame rate limiting
-        Uint32 frameTime = SDL_GetTicks() - frameStart;
-        if (frameTime < 16) {
-            SDL_Delay(16 - frameTime);
-        }
     }
 
     // --------------------------------------------------------
