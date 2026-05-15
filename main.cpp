@@ -40,6 +40,7 @@ struct SongInfo
     std::string path;
     std::string title;
     std::string artist;
+    int playCount = 0;
 };
 
 // ------------------------------------------------------------
@@ -83,7 +84,8 @@ std::string g_scanStatus = "";
 std::atomic<bool> g_requestNextSong = false;  // Set by audio thread when song ends
 
 // For "Add to playlist" popup
-int g_selectedSongForPlaylist = -1;
+SongInfo g_selectedSongForOptions;
+bool g_showSongOptionsPopup = false;
 bool g_showAddToPlaylistPopup = false;
 
 // For "Add from Library" popup
@@ -278,6 +280,7 @@ void save_songs_database(const std::vector<SongInfo>& songs)
         songJson["path"] = song.path;
         songJson["title"] = song.title;
         songJson["artist"] = song.artist;
+        songJson["playCount"] = song.playCount;
         j.push_back(songJson);
     }
 
@@ -296,7 +299,15 @@ std::vector<SongInfo> load_songs_database()
     if (!file.is_open()) return songs;
 
     nlohmann::json j;
-    file >> j;
+    try
+    {
+        file >> j;
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "Error parsing songs database: " << e.what() << std::endl;
+        return songs;
+    }
 
     int maxId = 0;
     for (const auto& item : j)
@@ -310,6 +321,7 @@ std::vector<SongInfo> load_songs_database()
         song.path = item.value("path", "");
         song.title = item.value("title", "");
         song.artist = item.value("artist", "");
+        song.playCount = item.value("playCount", 0);
         if (!song.path.empty())
         {
             // sanitize song title and artist name
@@ -335,6 +347,20 @@ std::vector<SongInfo> load_songs_database()
         save_songs_database(songs);
 
     return songs;
+}
+
+// Increment play count for a song and save to database
+void increment_play_count(int songId)
+{
+    std::lock_guard<std::mutex> lock(g_songMutex);
+    auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+        [songId](const SongInfo& s) { return s.id == songId; });
+    if (it != g_allSongs.end())
+    {
+        it->playCount++;
+        save_songs_database(g_allSongs);
+        std::cout << "Play count for " << it->title << " is now " << it->playCount << std::endl;
+    }
 }
 
 // ------------------------------------------------------------
@@ -422,6 +448,25 @@ bool add_song_to_playlist(const std::string& playlistName, int songId)
         return false; // Already in playlist
 
     it->songIds.push_back(songId);
+    save_playlists_database(g_playlists);
+    return true;
+}
+
+// Remove a song from a playlist
+bool remove_song_from_playlist(const std::string& playlistName, int songId)
+{
+    auto it = std::find_if(g_playlists.begin(), g_playlists.end(),
+        [&](const Playlist& p) { return p.name == playlistName; });
+    if (it == g_playlists.end()) return false;
+
+    // Cannot remove from library playlist? (optional - library should always have all songs)
+    if (playlistName == "library") return false;
+
+    // Find and remove the song ID from the playlist
+    auto songIt = std::find(it->songIds.begin(), it->songIds.end(), songId);
+    if (songIt == it->songIds.end()) return false; // Song not in playlist
+
+    it->songIds.erase(songIt);
     save_playlists_database(g_playlists);
     return true;
 }
@@ -671,6 +716,9 @@ void audio_callback(void* userdata, Uint8* stream, int len)
             {
                 audio->playing = false;
                 g_requestNextSong = true;  // Signal main thread to play next song
+
+                // increment play count for song
+                increment_play_count(g_nowPlaying.id);
             }
             break;
         }
@@ -953,7 +1001,7 @@ int main(int argc, char** argv)
             }
             else
             {
-                // go back to start if playlist over
+                // go back to start if playlist is over
                 play_song_by_id(g_playlists[g_currentPlaylistIndex].songIds[0]);
             }
         }
@@ -1250,10 +1298,9 @@ int main(int argc, char** argv)
                 ImGui::SetCursorScreenPos(titleMin);
                 if (ImGui::Selectable("##title_select", false, ImGuiSelectableFlags_None, ImVec2(titleMax.x - titleMin.x, titleMax.y - titleMin.y)))
                 {
-                    if (load_mp3(song.path))
+                    if (play_song_by_id(song.id))
                     {
                         std::cout << "Now playing: " << song.title << "\n";
-                        g_nowPlaying = song;
                     }
                 }
                 ImGui::PopStyleColor(3);
@@ -1265,13 +1312,13 @@ int main(int argc, char** argv)
 
                 ImGui::EndGroup();
 
-                // Add button
+                // Option button
                 ImGui::SameLine();
                 ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 50);
-                if (ImGui::Button("+"))
+                if (ImGui::Button("▼"))
                 {
-                    g_selectedSongForPlaylist = song.id;
-                    g_showAddToPlaylistPopup = true;
+                    g_selectedSongForOptions = song;
+                    g_showSongOptionsPopup = true;
                 }
 
                 ImGui::PopID();
@@ -1341,8 +1388,48 @@ int main(int argc, char** argv)
         }
 
         // ----------------------------------------------------
-        // Add to Playlist Popup (appears when clicking + on a song)
+        // Song options Popup
         // ----------------------------------------------------
+        if (g_showSongOptionsPopup)
+        {
+            ImGui::OpenPopup("song options##choice");
+            g_showSongOptionsPopup = false;
+        }
+
+        if (ImGui::BeginPopupModal("song options##choice", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            ImGui::TextColored(ImVec4(0,1,0,1), "%s", g_selectedSongForOptions.title.c_str());
+            ImGui::Text("play count: %d", g_selectedSongForOptions.playCount);
+
+            ImGui::Separator();
+
+            if (ImGui::Button("add to playlist"))
+            {
+                g_showAddToPlaylistPopup = true;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::SameLine();
+
+            if (ImGui::Button("remove from playlist"))
+            {
+                remove_song_from_playlist(g_playlists[g_currentPlaylistIndex].name, g_selectedSongForOptions.id);
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::Separator();
+
+            if (ImGui::Button("close"))
+            {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // ----------------------------------------------------
+        // Add song to playlist popup
+        // ----------------------------------------------------
+
         if (g_showAddToPlaylistPopup)
         {
             ImGui::OpenPopup("add to playlist##choice");
@@ -1356,7 +1443,7 @@ int main(int argc, char** argv)
             {
                 std::lock_guard<std::mutex> lock(g_songMutex);
                 auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-                    [](const SongInfo& s) { return s.id == g_selectedSongForPlaylist; });
+                    [](const SongInfo& s) { return s.id == g_selectedSongForOptions.id; });
                 if (it != g_allSongs.end())
                     songName = it->title + " by " + it->artist;
             }
@@ -1370,7 +1457,7 @@ int main(int argc, char** argv)
                 if(playlist.name != "library"){
                     if (ImGui::Selectable(playlist.name.c_str()))
                     {
-                        if (add_song_to_playlist(playlist.name, g_selectedSongForPlaylist))
+                        if (add_song_to_playlist(playlist.name, g_selectedSongForOptions.id))
                         {
                             // Success
                         }
