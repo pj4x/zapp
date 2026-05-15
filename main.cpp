@@ -73,11 +73,28 @@ struct AudioState
     std::mutex mutex;
 };
 
+// Audio cache structure
+struct CachedAudio
+{
+    std::vector<float> pcm;
+    int channels = 0;
+    int sampleRate = 0;
+    size_t totalFrames = 0;
+    bool isValid = false;
+    std::chrono::steady_clock::time_point lastUsed;
+};
+
+std::unordered_map<int, CachedAudio> g_audioCache;
+std::mutex g_cacheMutex;
+std::atomic<bool> g_preloadingNext = false;
+const size_t MAX_CACHE_SIZE = 5; // Maximum number of songs to keep in cache (adjust as needed)
+
 AudioState gAudio;
 std::vector<SongInfo> g_allSongs;          // All songs with IDs
 std::vector<Playlist> g_playlists;         // All playlists (includes "library")
 int g_currentPlaylistIndex = -1;           // Index of currently open playlist
 SongInfo g_nowPlaying;
+std::mutex g_nowPlayingMutex;
 std::mutex g_songMutex;
 std::atomic<bool> g_scanning = false;
 std::string g_scanStatus = "";
@@ -90,6 +107,14 @@ bool g_showAddToPlaylistPopup = false;
 
 // For "Add from Library" popup
 bool g_showAddFromLibraryPopup = false;
+
+// For async saving
+std::atomic<bool> g_savingSongs = false;
+std::atomic<bool> g_savingPlaylists = false;
+std::string g_saveStatus = "";
+std::mutex g_saveMutex;
+std::atomic<bool> g_incrementPlayCount = false;
+std::atomic<int> g_songToIncrement = -1;
 
 // ------------------------------------------------------------
 // MP3 Metadata Extraction (ID3v1)
@@ -270,8 +295,15 @@ void extract_metadata(const std::string& path, std::string& title, std::string& 
 
 const std::string SONGS_DB_FILENAME = "songs_db.json";
 
-void save_songs_database(const std::vector<SongInfo>& songs)
+void save_songs_worker(const std::vector<SongInfo>& songs)
 {
+    g_savingSongs = true;
+    {
+        std::lock_guard<std::mutex> lock(g_saveMutex);
+        g_saveStatus = "Saving songs database...";
+    }
+
+    // Perform the actual file write
     nlohmann::json j;
     for (const auto& song : songs)
     {
@@ -288,7 +320,34 @@ void save_songs_database(const std::vector<SongInfo>& songs)
     if (file.is_open())
     {
         file << j.dump(4);
+        {
+            std::lock_guard<std::mutex> lock(g_saveMutex);
+            g_saveStatus = "Songs database saved successfully!";
+        }
     }
+    else
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_saveMutex);
+            g_saveStatus = "ERROR: Could not save songs database!";
+        }
+        std::cerr << "Failed to save songs database\n";
+    }
+
+    g_savingSongs = false;
+}
+
+void save_songs_database_async(const std::vector<SongInfo>& songs)
+{
+    if (g_savingSongs) return; // Already saving, skip
+
+    // Make a copy of the songs to save (in case the original changes)
+    std::vector<SongInfo> songsCopy = songs;
+
+    std::thread saveThread([songsCopy]() {
+        save_songs_worker(songsCopy);
+    });
+    saveThread.detach();
 }
 
 std::vector<SongInfo> load_songs_database()
@@ -344,7 +403,7 @@ std::vector<SongInfo> load_songs_database()
     }
 
     if (needsSave)
-        save_songs_database(songs);
+        save_songs_database_async(songs);
 
     return songs;
 }
@@ -358,7 +417,7 @@ void increment_play_count(int songId)
     if (it != g_allSongs.end())
     {
         it->playCount++;
-        save_songs_database(g_allSongs);
+        save_songs_database_async(g_allSongs);
         std::cout << "Play count for " << it->title << " is now " << it->playCount << std::endl;
     }
 }
@@ -369,8 +428,15 @@ void increment_play_count(int songId)
 
 const std::string PLAYLISTS_DB_FILENAME = "playlists.json";
 
-void save_playlists_database(const std::vector<Playlist>& playlists)
+void save_playlists_worker(const std::vector<Playlist>& playlists)
 {
+    g_savingPlaylists = true;
+    {
+        std::lock_guard<std::mutex> lock(g_saveMutex);
+        g_saveStatus = "Saving playlists database...";
+    }
+
+    // Perform the actual file write
     nlohmann::json j;
     for (const auto& pl : playlists)
     {
@@ -384,7 +450,34 @@ void save_playlists_database(const std::vector<Playlist>& playlists)
     if (file.is_open())
     {
         file << j.dump(4);
+        {
+            std::lock_guard<std::mutex> lock(g_saveMutex);
+            g_saveStatus = "Playlists database saved successfully!";
+        }
     }
+    else
+    {
+        {
+            std::lock_guard<std::mutex> lock(g_saveMutex);
+            g_saveStatus = "ERROR: Could not save playlists database!";
+        }
+        std::cerr << "Failed to save playlists database\n";
+    }
+
+    g_savingPlaylists = false;
+}
+
+void save_playlists_database_async(const std::vector<Playlist>& playlists)
+{
+    if (g_savingPlaylists) return; // Already saving, skip
+
+    // Make a copy of the playlists to save (in case the original changes)
+    std::vector<Playlist> playlistsCopy = playlists;
+
+    std::thread saveThread([playlistsCopy]() {
+        save_playlists_worker(playlistsCopy);
+    });
+    saveThread.detach();
 }
 
 std::vector<Playlist> load_playlists_database()
@@ -433,7 +526,7 @@ void ensure_library_playlist()
         for (const auto& song : g_allSongs)
             it->songIds.push_back(song.id);
     }
-    save_playlists_database(g_playlists);
+    save_playlists_database_async(g_playlists);
 }
 
 // Add a song to a playlist (avoid duplicates)
@@ -448,7 +541,7 @@ bool add_song_to_playlist(const std::string& playlistName, int songId)
         return false; // Already in playlist
 
     it->songIds.push_back(songId);
-    save_playlists_database(g_playlists);
+    save_playlists_database_async(g_playlists);
     return true;
 }
 
@@ -467,7 +560,7 @@ bool remove_song_from_playlist(const std::string& playlistName, int songId)
     if (songIt == it->songIds.end()) return false; // Song not in playlist
 
     it->songIds.erase(songIt);
-    save_playlists_database(g_playlists);
+    save_playlists_database_async(g_playlists);
     return true;
 }
 
@@ -482,7 +575,7 @@ bool create_playlist(const std::string& name)
     Playlist newPlaylist;
     newPlaylist.name = name;
     g_playlists.push_back(newPlaylist);
-    save_playlists_database(g_playlists);
+    save_playlists_database_async(g_playlists);
     return true;
 }
 
@@ -496,7 +589,7 @@ bool delete_playlist(const std::string& name)
     if (it == g_playlists.end()) return false;
 
     g_playlists.erase(it);
-    save_playlists_database(g_playlists);
+    save_playlists_database_async(g_playlists);
     return true;
 }
 
@@ -591,7 +684,7 @@ void scan_folder_worker(const std::string& folderPath)
         }
 
         // Save songs database
-        save_songs_database(g_allSongs);
+        save_songs_database_async(g_allSongs);
 
         // Update library playlist
         ensure_library_playlist();
@@ -619,72 +712,228 @@ void start_folder_scan(const std::string& folderPath)
 // Load MP3 with thread safety
 // ------------------------------------------------------------
 
-bool load_mp3(const std::string& path)
+// Clear least recently used from cache (simple FIFO for now)
+// WARNING: This function assumes g_cacheMutex is already locked!
+void manage_cache_size()
 {
-    mp3dec_ex_t dec;
-
-    if (mp3dec_ex_open(&dec, path.c_str(), MP3D_SEEK_TO_SAMPLE))
+    // Do NOT lock here - mutex should already be locked by caller
+    if (g_audioCache.size() > MAX_CACHE_SIZE)
     {
-        std::cerr << "Failed to open MP3: " << path << "\n";
+        // Find least recently used (LRU)
+        auto lru = g_audioCache.begin();
+        for (auto it = g_audioCache.begin(); it != g_audioCache.end(); ++it)
+        {
+            if (it->second.lastUsed < lru->second.lastUsed)
+                lru = it;
+        }
+
+        std::cout << "Cache size exceeded, removing LRU song ID: " << lru->first << "\n";
+        g_audioCache.erase(lru);
+    }
+}
+
+// load mp3 from disk into cache
+bool load_mp3(int songId, const std::string& path)
+{
+    std::cout << "load_mp3: Starting for song " << songId << std::endl;
+
+    // Check if already in cache
+    {
+        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
+        auto it = g_audioCache.find(songId);
+        if (it != g_audioCache.end() && it->second.isValid)
+        {
+            std::cout << "Song " << songId << " already in cache\n";
+            return true;
+        }
+    }
+
+    std::cout << "Loading song " << songId << " from disk: " << path << "\n";
+    std::cout << "Opening MP3 file..." << std::endl;
+
+    mp3dec_ex_t dec;
+    int result = mp3dec_ex_open(&dec, path.c_str(), MP3D_SEEK_TO_SAMPLE);
+    if (result)
+    {
+        std::cerr << "Failed to open MP3: " << path << " error code: " << result << "\n";
         return false;
     }
 
-    // Prepare new audio data
-    AudioState newAudio;
-    newAudio.channels = dec.info.channels;
-    newAudio.sampleRate = dec.info.hz;
-    newAudio.totalFrames = dec.samples / newAudio.channels;
-    newAudio.pcm.resize(dec.samples);
-    newAudio.playing = false;
-    newAudio.currentFrame = 0;
+    std::cout << "MP3 opened successfully. Channels: " << dec.info.channels
+              << ", Sample rate: " << dec.info.hz
+              << ", Samples: " << dec.samples << std::endl;
 
-    size_t read = mp3dec_ex_read(&dec, newAudio.pcm.data(), dec.samples);
+    CachedAudio cached;
+    cached.channels = dec.info.channels;
+    cached.sampleRate = dec.info.hz;
+    cached.totalFrames = dec.samples / cached.channels;
+    cached.pcm.resize(dec.samples);
+    cached.isValid = true;
+    cached.lastUsed = std::chrono::steady_clock::now();
+
+    std::cout << "Reading PCM data (" << dec.samples << " samples)..." << std::endl;
+    size_t read = mp3dec_ex_read(&dec, cached.pcm.data(), dec.samples);
+    std::cout << "Read " << read << " samples" << std::endl;
 
     mp3dec_ex_close(&dec);
 
     if (read == 0)
     {
-        std::cerr << "Failed to decode MP3\n";
+        std::cerr << "Failed to decode MP3: " << path << "\n";
         return false;
     }
 
-    // Lock audio callback while swapping data
-    SDL_LockAudio();
-
-    // Swap with global audio state
+    std::cout << "Storing in cache..." << std::endl;
+    // Store in cache
     {
-        std::lock_guard<std::mutex> lock(gAudio.mutex);
-        gAudio.pcm.swap(newAudio.pcm);
-        gAudio.channels = newAudio.channels;
-        gAudio.sampleRate = newAudio.sampleRate;
-        gAudio.totalFrames = newAudio.totalFrames;
-        gAudio.currentFrame = 0;
-        gAudio.playing = true; // Auto-start playback
+        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
+        g_audioCache[songId] = std::move(cached);
+        manage_cache_size();
     }
 
-    SDL_UnlockAudio();
-
-    std::cout << "Loaded MP3: " << path << "\n";
-    std::cout << "Channels: " << gAudio.channels << "\n";
-    std::cout << "Sample Rate: " << gAudio.sampleRate << "\n";
-
+    std::cout << "Successfully loaded and cached song " << songId << "\n";
     return true;
 }
 
-// Play a song by its ID
+// Play a song by ID - moves from cache to avoid copying PCM data
 bool play_song_by_id(int songId)
 {
-    auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
-        [songId](const SongInfo& s) { return s.id == songId; });
-    if (it != g_allSongs.end())
+    std::cout << "play_song_by_id: Starting for song ID " << songId << std::endl;
+
+    // Quick validation
+    if (songId < 0) {
+        std::cerr << "Invalid song ID: " << songId << std::endl;
+        return false;
+    }
+
+
+    // Find the song info
+    SongInfo songInfo;
     {
-        if (load_mp3(it->path))
+        std::lock_guard<std::mutex> lock(g_songMutex);
+        auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+            [songId](const SongInfo& s) { return s.id == songId; });
+        if (it == g_allSongs.end())
         {
-            g_nowPlaying = *it;
-            return true;
+            std::cerr << "Song ID " << songId << " not found in database\n";
+            return false;
+        }
+        songInfo = *it; // Copy the needed info
+    }
+
+    std::cout << "Found song: " << songInfo.title << " at path: " << songInfo.path << std::endl;
+
+    // Check if song is cached, if not, load it
+    bool needsLoad = false;
+    {
+        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
+        auto cacheIt = g_audioCache.find(songId);
+        if (cacheIt == g_audioCache.end() || !cacheIt->second.isValid)
+        {
+            needsLoad = true;
         }
     }
-    return false;
+
+    if (needsLoad)
+    {
+        std::cout << "Song " << songId << " not cached, loading first...\n";
+        if (!load_mp3(songId, songInfo.path))
+        {
+            std::cerr << "Failed to load song " << songId << "\n";
+            return false;
+        }
+    }
+
+    // Move from cache to global audio state
+    // IMPORTANT: Lock in consistent order (cache first, then audio)
+    {
+        std::lock_guard<std::mutex> cacheLock(g_cacheMutex);
+        std::lock_guard<std::mutex> audioLock(gAudio.mutex);
+
+        auto cacheIt = g_audioCache.find(songId);
+        if (cacheIt == g_audioCache.end() || !cacheIt->second.isValid)
+        {
+            std::cerr << "Song " << songId << " not found in cache after loading\n";
+            return false;
+        }
+
+        // Validate PCM data
+        if (cacheIt->second.pcm.empty()) {
+            std::cerr << "Empty PCM data for song " << songId << std::endl;
+            return false;
+        }
+
+        // update last used time stamp
+        cacheIt->second.lastUsed = std::chrono::steady_clock::now();
+
+        // Move PCM data from cache to audio state
+        gAudio.pcm.swap(cacheIt->second.pcm);
+        gAudio.channels = cacheIt->second.channels;
+        gAudio.sampleRate = cacheIt->second.sampleRate;
+        gAudio.totalFrames = cacheIt->second.totalFrames;
+        gAudio.currentFrame = 0;
+        gAudio.playing = true;
+
+        std::cout << "Audio state updated. Channels: " << gAudio.channels
+                  << ", Sample rate: " << gAudio.sampleRate
+                  << ", Total frames: " << gAudio.totalFrames << std::endl;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_nowPlayingMutex);
+        g_nowPlaying = songInfo;
+    }
+
+    std::cout << "Now playing song ID " << songId << ": " << songInfo.title << "\n";
+    return true;
+}
+
+// Preload the next song in background
+void preload_next_song_background()
+{
+    if (g_preloadingNext) return;
+
+    // Safety check - make sure we have a valid playlist
+    if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
+        return;
+
+    const auto& playlist = g_playlists[g_currentPlaylistIndex];
+
+    // Check if playlist is empty
+    if (playlist.songIds.empty())
+        return;
+
+    int nextId = get_next_song_in_playlist(g_nowPlaying.id);
+
+    // If at end of playlist, loop to first song
+    if (nextId == -1 && !playlist.songIds.empty())
+    {
+        nextId = playlist.songIds[0];
+    }
+
+    if (nextId != -1 && nextId != g_nowPlaying.id)  // Don't preload the same song
+    {
+        std::string songPath;
+        {
+            std::lock_guard<std::mutex> lock(g_songMutex);
+            auto it = std::find_if(g_allSongs.begin(), g_allSongs.end(),
+                [nextId](const SongInfo& s) { return s.id == nextId; });
+            if (it != g_allSongs.end())
+            {
+                songPath = it->path;
+            }
+        }
+
+        if (!songPath.empty())
+        {
+            g_preloadingNext = true;
+            std::thread preloadThread([nextId, path = std::move(songPath)]() {
+                load_mp3(nextId, path);
+                g_preloadingNext = false;
+            });
+            preloadThread.detach();
+        }
+    }
 }
 
 // ------------------------------------------------------------
@@ -717,8 +966,12 @@ void audio_callback(void* userdata, Uint8* stream, int len)
                 audio->playing = false;
                 g_requestNextSong = true;  // Signal main thread to play next song
 
-                // increment play count for song
-                increment_play_count(g_nowPlaying.id);
+                // Set flag for main thread to increment play count
+                g_incrementPlayCount = true;
+                {
+                    std::lock_guard<std::mutex> lock(g_nowPlayingMutex);
+                    g_songToIncrement = g_nowPlaying.id;
+                }
             }
             break;
         }
@@ -986,6 +1239,14 @@ int main(int argc, char** argv)
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
+        if(gAudio.playing){
+            preload_next_song_background();
+        }
+
+        // ----------------------------------------------------
+        // Auto-play next song when current finishes
+        // ----------------------------------------------------
+
         // ----------------------------------------------------
         // Auto-play next song when current finishes
         // ----------------------------------------------------
@@ -994,16 +1255,44 @@ int main(int argc, char** argv)
         {
             g_requestNextSong = false;  // Reset flag
 
+            // Safety checks
+            if (g_currentPlaylistIndex < 0 || g_currentPlaylistIndex >= (int)g_playlists.size())
+                continue;  // Skip if no valid playlist
+
+            const auto& currentPlaylist = g_playlists[g_currentPlaylistIndex];
+
+            // Check if playlist is empty
+            if (currentPlaylist.songIds.empty())
+                continue;
+
             int nextId = get_next_song_in_playlist(g_nowPlaying.id);
+
             if (nextId != -1)
             {
-                play_song_by_id(nextId);
+                // Play the next song
+                if (!play_song_by_id(nextId))
+                {
+                    std::cerr << "Failed to play next song ID: " << nextId << std::endl;
+                }
             }
             else
             {
-                // go back to start if playlist is over
-                play_song_by_id(g_playlists[g_currentPlaylistIndex].songIds[0]);
+                // End of playlist - loop back to first song
+                int firstSongId = currentPlaylist.songIds[0];
+                std::cout << "End of playlist, looping to first song: " << firstSongId << std::endl;
+                if (!play_song_by_id(firstSongId))
+                {
+                    std::cerr << "Failed to loop to first song ID: " << firstSongId << std::endl;
+                }
             }
+        }
+
+        // Increment play count
+        if (g_incrementPlayCount)
+        {
+            g_incrementPlayCount = false;
+            increment_play_count(g_songToIncrement);
+            g_songToIncrement = -1;
         }
 
         // ----------------------------------------------------
@@ -1298,9 +1587,16 @@ int main(int argc, char** argv)
                 ImGui::SetCursorScreenPos(titleMin);
                 if (ImGui::Selectable("##title_select", false, ImGuiSelectableFlags_None, ImVec2(titleMax.x - titleMin.x, titleMax.y - titleMin.y)))
                 {
-                    if (play_song_by_id(song.id))
-                    {
-                        std::cout << "Now playing: " << song.title << "\n";
+                    // safety check
+                    if (song.id >= 0) {
+                        if (play_song_by_id(song.id))
+                        {
+                            std::cout << "Now playing: " << song.title << "\n";
+                        }
+                        else
+                        {
+                            std::cerr << "Failed to play song: " << song.title << std::endl;
+                        }
                     }
                 }
                 ImGui::PopStyleColor(3);
@@ -1345,7 +1641,14 @@ int main(int argc, char** argv)
 
             ImGui::BeginChild("LibrarySongs", ImVec2(500, 300), true);
 
-            for (const auto& song : g_allSongs)
+            // Take a snapshot of all songs under mutex protection
+            std::vector<SongInfo> songsSnapshot;
+            {
+                std::lock_guard<std::mutex> lock(g_songMutex);
+                songsSnapshot = g_allSongs; // Copy the vector
+            }
+
+            for (const auto& song : songsSnapshot)
             {
                 std::string filterLower = addFilter;
                 std::transform(filterLower.begin(), filterLower.end(), filterLower.begin(), ::tolower);
@@ -1366,14 +1669,7 @@ int main(int argc, char** argv)
                     if (g_currentPlaylistIndex >= 0 && g_currentPlaylistIndex < (int)g_playlists.size())
                     {
                         const std::string& playlistName = g_playlists[g_currentPlaylistIndex].name;
-                        if (add_song_to_playlist(playlistName, song.id))
-                        {
-                            // Success
-                        }
-                        else
-                        {
-                            // Could show a tooltip, but ignore for now
-                        }
+                        add_song_to_playlist(playlistName, song.id);
                     }
                 }
             }
