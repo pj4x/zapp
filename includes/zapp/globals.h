@@ -24,6 +24,7 @@ inline std::mutex g_songMutex;
 inline std::atomic<bool> g_scanning = false;
 inline std::string g_scanStatus = "";
 inline std::atomic<bool> g_requestNextSong = false;  // Set by audio thread when song ends
+inline bool g_minimized = false;
 
 // audio specs
 inline SDL_AudioSpec g_currentAudioSpec;

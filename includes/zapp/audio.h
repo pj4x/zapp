@@ -64,7 +64,7 @@ inline void audio_callback(void* userdata, Uint8* stream, int len) {
     }
 
     // Update spectrum visualization
-    if (!spectrumBuffer.empty()) {
+    if (!spectrumBuffer.empty() && !g_minimized) {
         update_audio_spectrum_fft(spectrumBuffer.data(), spectrumBuffer.size(), 1);
     }
 

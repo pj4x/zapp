@@ -13,7 +13,6 @@
 int getCurrentPlayingId();
 
 namespace FFT {
-    // Simple in-place FFT for real-time audio visualization
 
     static void fft(float* real, float* imag, int n, bool invert) {
         if (n == 1) return;
@@ -298,7 +297,7 @@ void draw_fft_spectrum(float width, float height) {
         }
     }
 
-    // Add frequency labels with better positioning
+    // frequency labels
     ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(200, 200, 200, 180));
     ImGui::SetCursorScreenPos(ImVec2(pos.x + 5, pos.y + height - 15));
     ImGui::Text("20Hz");
@@ -309,8 +308,6 @@ void draw_fft_spectrum(float width, float height) {
     ImGui::SetCursorScreenPos(ImVec2(pos.x + width - 45, pos.y + height - 15));
     ImGui::Text("20kHz");
     ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(width, height));
 }
 
 #endif

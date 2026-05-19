@@ -39,6 +39,7 @@
 #include "helperImgui.h"
 #include "helperSdl.h"
 #include "visualizer.h"
+#include "version.h"
 
 // ------------------------------------------------------------
 // Main
@@ -153,7 +154,7 @@ int main(int argc, char** argv)
             if (event.type == SDL_QUIT) running = false;
         }
         Uint32 windowFlags = SDL_GetWindowFlags(window);
-        bool g_minimized = (windowFlags & SDL_WINDOW_MINIMIZED) != 0;
+        g_minimized = (windowFlags & SDL_WINDOW_MINIMIZED) != 0;
 
             // chose next song randomly if shuffle is on
             if(g_nextIdRand && g_shuffle){
@@ -329,7 +330,7 @@ int main(int argc, char** argv)
 
             // Calculate visualizer size
             float visualizerWidth = ImGui::GetContentRegionAvail().x;
-            float visualizerHeight = 120.0f;  // Adjust as needed
+            float visualizerHeight = ImGui::GetContentRegionAvail().y;
 
             // Draw the waveform visualizer
             draw_fft_spectrum(visualizerWidth, visualizerHeight);
@@ -830,7 +831,7 @@ int main(int argc, char** argv)
                 ImGui::Text("about");
                 ImGui::Indent();
                 ImGui::Text("zapp music player");
-                ImGui::Text("ver 1.0");
+                ImGui::Text("ver %s", zapp_ver.c_str());
                 ImGui::Unindent();
 
                 ImGui::Spacing();
